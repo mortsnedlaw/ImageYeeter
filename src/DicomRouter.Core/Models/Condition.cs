@@ -1,0 +1,40 @@
+using System;
+
+namespace DicomRouter.Core.Models
+{
+    /// <summary>
+    /// A condition that compares a metadata field to a value using an operator.
+    /// </summary>
+    public class Condition
+    {
+        /// <summary>
+        /// The metadata field name (e.g., "Modality", "SliceThickness").
+        /// </summary>
+        public string Field { get; set; } = string.Empty;
+
+        /// <summary>
+        /// The operator to apply.
+        /// </summary>
+        public ConditionOperator Operator { get; set; }
+
+        /// <summary>
+        /// The value to compare against.
+        /// </summary>
+        public string Value { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// Supported comparison operators for conditions.
+    /// </summary>
+    public enum ConditionOperator
+    {
+        Equals,
+        NotEquals,
+        GreaterThan,
+        LessThan,
+        Contains,
+        StartsWith,
+        BeforeDate,
+        AfterDate
+    }
+}

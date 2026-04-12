@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <TargetFramework>net10-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DicomRouter.Core\DicomRouter.Core.csproj" />
+    <ProjectReference Include="..\DicomRouter.Infrastructure\DicomRouter.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

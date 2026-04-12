@@ -1,0 +1,13 @@
+[
+  {
+    "Name": "CT Head",
+    "Priority": 10,
+    "Enabled": true,
+    "Conditions": [
+      { "Field": "Modality", "Operator": 0, "Value": "CT" },
+      { "Field": "StudyDescription", "Operator": 4, "Value": "HEAD" }
+    ],
+    "DestinationNames": [ "LocalPACs" ],
+    "StopOnMatch": true
+  }
+]

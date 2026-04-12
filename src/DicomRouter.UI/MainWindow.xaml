@@ -1,0 +1,40 @@
+<Window x:Class="DicomRouter.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DicomRouter" Height="600" Width="900">
+    <Grid>
+        <TabControl>
+            <TabItem Header="Local SCP">
+                <StackPanel Margin="10">
+                    <TextBlock Text="AE Title, IP, Port, Max Associations" FontWeight="Bold" />
+                    <!-- Controls to be implemented -->
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Destinations">
+                <StackPanel Margin="10">
+                    <TextBlock Text="List of destinations - add/edit/test" FontWeight="Bold" />
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Routing Rules">
+                <StackPanel Margin="10">
+                    <TextBlock Text="Rule builder UI" FontWeight="Bold" />
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Tag Modifications">
+                <StackPanel Margin="10">
+                    <TextBlock Text="Per-rule tag overrides" FontWeight="Bold" />
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Logging & Monitoring">
+                <StackPanel Margin="10">
+                    <TextBlock Text="Live logs and statistics" FontWeight="Bold" />
+                </StackPanel>
+            </TabItem>
+            <TabItem Header="Service Control">
+                <StackPanel Margin="10">
+                    <TextBlock Text="Install/Start/Stop Service" FontWeight="Bold" />
+                </StackPanel>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>
