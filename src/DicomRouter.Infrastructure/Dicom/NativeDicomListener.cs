@@ -61,6 +61,7 @@ public sealed class NativeDicomListener : IDicomListener
             {
                 linked.CancelAfter(_associationTimeout);
                 var (type, body) = await DicomProtocol.ReadPduAsync(stream, linked.Token, _maxPduSize).ConfigureAwait(false);
+                _events?.Publish(new RuntimeEvent(RuntimeEventType.ProtocolEvent, DateTime.UtcNow, $"TCP {type} ({body.Length} bytes)"));
                 if (type != PduType.AssociateRequest) return;
                 var request = DicomProtocol.ParseAssociateRequest(body);
                 _events?.Publish(new RuntimeEvent(RuntimeEventType.AssociationOpened, DateTime.UtcNow, $"{request.CallingAe} -> {_aeTitle}"));
@@ -96,6 +97,7 @@ public sealed class NativeDicomListener : IDicomListener
         while (!ct.IsCancellationRequested)
         {
             var (type, body) = await DicomProtocol.ReadPduAsync(stream, ct, _maxPduSize).ConfigureAwait(false);
+            _events?.Publish(new RuntimeEvent(RuntimeEventType.ProtocolEvent, DateTime.UtcNow, $"PDU {type} ({body.Length} bytes)"));
             if (type == PduType.ReleaseRequest) { await DicomProtocol.WritePduAsync(stream, PduType.ReleaseResponse, Array.Empty<byte>(), ct); return; }
             if (type == PduType.Abort) return;
             if (type != PduType.Data) continue;
