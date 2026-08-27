@@ -16,7 +16,8 @@ public static class Program
             configuration.Listeners.Add(new ListenerConfiguration { Name = "ImageYeeter Main" });
 
         var evaluator = new RuleEvaluator();
-        var forwarder = new DicomForwarder();
+        var runtimeEvents = new RuntimeEventBus();
+        var forwarder = new DicomForwarder { Events = runtimeEvents };
         var spoolPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ImageYeeter", "spool");
         using var spooler = new Spooler(spoolPath, forwarder, configuration.Destinations.ToArray());
         spooler.StartProcessing();
@@ -31,7 +32,19 @@ public static class Program
             Console.WriteLine($"Received {args.Dataset.Get(DicomTag.SOPInstanceUid)}; matched {string.Join(", ", matches)}");
         }
 
-        await using var listeners = new ListenerManager(ReceiveAsync);
+        await using var listeners = new ListenerManager(ReceiveAsync, runtimeEvents);
+        await using var management = new ManagementPipeServer(async (request, cancellationToken) =>
+        {
+            if (request.Command.Equals("get-config", StringComparison.OrdinalIgnoreCase))
+                return new ManagementResponse(true, "Configuration loaded", configuration, new Dictionary<string, string> { ["listeners"] = listeners.RunningIds.Count.ToString() });
+            if (request.Command.Equals("save-config", StringComparison.OrdinalIgnoreCase) && request.Configuration != null)
+            {
+                await store.SaveAsync(request.Configuration, cancellationToken).ConfigureAwait(false);
+                return new ManagementResponse(true, "Configuration saved");
+            }
+            return new ManagementResponse(false, $"Unknown management command: {request.Command}");
+        });
+        management.Start();
         foreach (var listener in configuration.Listeners.Where(x => x.Enabled && x.AutoStart))
         {
             try { await listeners.StartAsync(listener).ConfigureAwait(false); }

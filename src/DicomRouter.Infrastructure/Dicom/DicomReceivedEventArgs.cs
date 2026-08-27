@@ -11,6 +11,7 @@ namespace DicomRouter.Infrastructure.Dicom
         /// </summary>
         public NativeDicomDataset Dataset { get; set; } = new NativeDicomDataset(Array.Empty<DicomElement>());
         public byte[] RawDataset { get; set; } = Array.Empty<byte>();
+        public string TransferSyntaxUid { get; set; } = string.Empty;
 
         /// <summary>
         /// Metadata dictionary extracted from the dataset for quick evaluation.

@@ -12,10 +12,12 @@ internal static class DicomProtocol
     private static readonly byte[] UidImplicit = Encoding.ASCII.GetBytes("1.2.840.10008.1.2\0");
     private static readonly byte[] UidExplicit = Encoding.ASCII.GetBytes("1.2.840.10008.1.2.1\0");
 
-    public static async Task<(PduType Type, byte[] Body)> ReadPduAsync(NetworkStream stream, CancellationToken ct)
+    public static async Task<(PduType Type, byte[] Body)> ReadPduAsync(NetworkStream stream, CancellationToken ct, int maxPduSize = 16 * 1024 * 1024)
     {
         var header = await ReadExactlyAsync(stream, 6, ct).ConfigureAwait(false);
         var length = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(2));
+        if (length > maxPduSize) throw new InvalidDataException($"PDU length {length} exceeds configured maximum {maxPduSize}.");
+        if (!Enum.IsDefined((PduType)header[0])) throw new InvalidDataException($"Unknown DICOM PDU type 0x{header[0]:X2}.");
         return ((PduType)header[0], await ReadExactlyAsync(stream, checked((int)length), ct).ConfigureAwait(false));
     }
 
@@ -104,24 +106,50 @@ internal static class DicomProtocol
 
     public static byte[] BuildAssociateReject(byte result = 1, byte source = 1, byte reason = 7) => new byte[] { 0, 0, result, source, reason };
 
-    public static byte[] BuildCommand(ushort commandField, ushort messageId, ushort datasetType, string sopClass, uint sopInstance = 0, ushort status = 0)
+    public static byte[] BuildCommand(ushort commandField, ushort messageId, ushort datasetType, string sopClass, string? sopInstance = null, ushort status = 0)
     {
         var parts = new List<(DicomTag Tag, string Vr, byte[] Value)>();
         AddUs(parts, DicomTag.CommandField, commandField);
         if (messageId != 0) AddUs(parts, DicomTag.MessageId, messageId);
-        if (sopClass.Length > 0) parts.Add((commandField is 0x0001 or 0x8001 ? DicomTag.AffectedSopClassUid : DicomTag.RequestedSopClassUid, "UI", PaddedUid(sopClass)));
-        if (sopInstance != 0) parts.Add((commandField == 0x0001 ? DicomTag.AffectedSopInstanceUid : DicomTag.RequestedSopInstanceUid, "UI", PaddedUid(sopInstance.ToString())));
+        if (sopClass.Length > 0) parts.Add((commandField is 0x0001 or 0x0030 or 0x8001 or 0x8030 ? DicomTag.AffectedSopClassUid : DicomTag.RequestedSopClassUid, "UI", PaddedUid(sopClass)));
+        if (!string.IsNullOrWhiteSpace(sopInstance)) parts.Add((commandField == 0x0001 ? DicomTag.AffectedSopInstanceUid : DicomTag.RequestedSopInstanceUid, "UI", PaddedUid(sopInstance)));
         AddUs(parts, DicomTag.CommandDataSetType, datasetType); if (status != 0) AddUs(parts, DicomTag.Status, status);
         var withoutLength = WriteCommandElements(parts); var result = new List<(DicomTag, string, byte[])> { (new DicomTag(0, 0), "UL", BitConverter.GetBytes((uint)withoutLength.Length)) }; result.AddRange(parts);
         return WriteCommandElements(result);
     }
 
-    public static byte[] BuildDataPdu(byte contextId, byte control, byte[] command, byte[]? dataset = null)
+    public static byte[] BuildDataPdu(byte contextId, byte control, byte[] command, byte[]? dataset = null, int maxPduSize = 16 * 1024)
     {
         using var body = new MemoryStream();
-        WritePdv(body, contextId, 0x03, command);
-        if (dataset is not null) WritePdv(body, contextId, 0x02, dataset);
+        WritePdvFragments(body, contextId, 0x01, command, maxPduSize);
+        if (dataset is not null) WritePdvFragments(body, contextId, 0x00, dataset, maxPduSize);
         return body.ToArray();
+    }
+
+    public static async Task WriteDataPdusAsync(NetworkStream stream, byte contextId, byte[] command, byte[]? dataset, int maxPduSize, CancellationToken cancellationToken)
+    {
+        foreach (var body in BuildDataPdus(contextId, command, dataset, maxPduSize))
+            await WritePduAsync(stream, PduType.Data, body, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static IEnumerable<byte[]> BuildDataPdus(byte contextId, byte[] command, byte[]? dataset, int maxPduSize)
+    {
+        var fragmentSize = Math.Max(1, maxPduSize - 6);
+        foreach (var fragment in Fragment(contextId, 0x01, command, fragmentSize)) yield return fragment;
+        if (dataset is not null)
+            foreach (var fragment in Fragment(contextId, 0x00, dataset, fragmentSize)) yield return fragment;
+    }
+
+    private static IEnumerable<byte[]> Fragment(byte contextId, byte control, byte[] payload, int fragmentSize)
+    {
+        if (payload.Length == 0) { using var empty = new MemoryStream(); WritePdv(empty, contextId, (byte)(control | 2), payload); yield return empty.ToArray(); yield break; }
+        for (var offset = 0; offset < payload.Length; offset += fragmentSize)
+        {
+            var count = Math.Min(fragmentSize, payload.Length - offset);
+            using var body = new MemoryStream();
+            WritePdv(body, contextId, (byte)(control | (offset + count == payload.Length ? 2 : 0)), payload.AsSpan(offset, count).ToArray());
+            yield return body.ToArray();
+        }
     }
 
     public static IEnumerable<(byte ContextId, byte Control, byte[] Payload)> ParseDataPdu(byte[] body)
@@ -134,6 +162,17 @@ internal static class DicomProtocol
     private static void AddUs(List<(DicomTag, string, byte[])> list, DicomTag tag, ushort value) { var b = new byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, value); list.Add((tag, "US", b)); }
     private static byte[] PaddedUid(string value) { var b = Encoding.ASCII.GetBytes(value); return b.Length % 2 == 0 ? b : b.Concat(new byte[] { 0 }).ToArray(); }
     private static void WritePdv(Stream stream, byte id, byte control, byte[] payload) { WriteUInt32Big(stream, (uint)(payload.Length + 2)); stream.WriteByte(id); stream.WriteByte(control); stream.Write(payload); }
+    private static void WritePdvFragments(Stream stream, byte id, byte control, byte[] payload, int maxPduSize)
+    {
+        var fragmentSize = Math.Max(1, maxPduSize - 6);
+        if (payload.Length == 0) { WritePdv(stream, id, (byte)(control | 2), payload); return; }
+        for (var offset = 0; offset < payload.Length; offset += fragmentSize)
+        {
+            var count = Math.Min(fragmentSize, payload.Length - offset);
+            var last = offset + count == payload.Length;
+            WritePdv(stream, id, (byte)(control | (last ? 2 : 0)), payload.AsSpan(offset, count).ToArray());
+        }
+    }
     private static void WriteItem(Stream stream, byte type, byte[] data) { stream.WriteByte(type); stream.WriteByte(0); WriteUInt16Big(stream, (ushort)data.Length); stream.Write(data); }
     private static void WriteAsciiItem(Stream stream, byte type, string value) => WriteItem(stream, type, Encoding.ASCII.GetBytes(value));
     private static void WriteFixed(Stream stream, string value, int length) => stream.Write(Encoding.ASCII.GetBytes(value.PadRight(length).Substring(0, length)));

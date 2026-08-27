@@ -6,7 +6,8 @@ namespace DicomRouter.Infrastructure.Dicom;
 public enum DicomTransferSyntax
 {
     ImplicitVrLittleEndian,
-    ExplicitVrLittleEndian
+    ExplicitVrLittleEndian,
+    Encapsulated
 }
 
 public readonly record struct DicomTag(ushort Group, ushort Element)
@@ -80,16 +81,19 @@ public sealed class NativeDicomDataset
             uint length;
             if (explicitVr)
             {
+                if (offset + 2 > bytes.Length) break;
                 vr = Encoding.ASCII.GetString(bytes.Slice(offset, 2));
                 offset += 2;
                 if (IsLongVr(vr))
                 {
+                    if (offset + 6 > bytes.Length) break;
                     offset += 2;
                     length = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offset, 4));
                     offset += 4;
                 }
                 else
                 {
+                    if (offset + 2 > bytes.Length) break;
                     length = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offset, 2));
                     offset += 2;
                 }
@@ -97,6 +101,7 @@ public sealed class NativeDicomDataset
             else
             {
                 vr = commandSet ? CommandVr(tag) : "UN";
+                if (offset + 4 > bytes.Length) break;
                 length = BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offset, 4));
                 offset += 4;
             }
@@ -139,4 +144,40 @@ public sealed class NativeDicomDataset
     private static string CommandVr(DicomTag tag) => tag == DicomTag.CommandField || tag == DicomTag.MessageId || tag == DicomTag.MessageIdBeingRespondedTo || tag == DicomTag.CommandDataSetType || tag == DicomTag.Status ? "US" : "UI";
     private static void WriteUInt16(Stream s, ushort value) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, value); s.Write(b); }
     private static void WriteUInt32(Stream s, uint value) { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, value); s.Write(b); }
+}
+
+public sealed record DicomFileData(NativeDicomDataset Dataset, DicomTransferSyntax TransferSyntax, IReadOnlyDictionary<DicomTag, DicomElement> FileMeta);
+
+public static class DicomFileParser
+{
+    private static readonly DicomTag TransferSyntaxUid = new(0x0002, 0x0010);
+
+    public static DicomFileData Parse(ReadOnlySpan<byte> bytes)
+    {
+        var offset = bytes.Length >= 132 && bytes.Slice(128, 4).SequenceEqual("DICM"u8) ? 132 : 0;
+        var metaStart = offset;
+        while (offset + 8 <= bytes.Length)
+        {
+            var group = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offset, 2));
+            if (group != 0x0002) break;
+            var element = BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offset + 2, 2));
+            var vr = Encoding.ASCII.GetString(bytes.Slice(offset + 4, 2));
+            var length = IsLongVr(vr) ? BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(offset + 8, 4)) : BinaryPrimitives.ReadUInt16LittleEndian(bytes.Slice(offset + 6, 2));
+            var header = IsLongVr(vr) ? 12 : 8;
+            if (length > int.MaxValue || offset + header + (int)length > bytes.Length) throw new InvalidDataException("Malformed DICOM file meta information.");
+            offset += header + (int)length;
+        }
+        var meta = NativeDicomDataset.Parse(bytes.Slice(metaStart, offset - metaStart), DicomTransferSyntax.ExplicitVrLittleEndian).Elements.ToDictionary(x => x.Tag);
+        var uid = meta.TryGetValue(TransferSyntaxUid, out var transfer) ? transfer.Text : "1.2.840.10008.1.2.1";
+        var syntax = uid switch
+        {
+            "1.2.840.10008.1.2" => DicomTransferSyntax.ImplicitVrLittleEndian,
+            "1.2.840.10008.1.2.1" => DicomTransferSyntax.ExplicitVrLittleEndian,
+            _ => DicomTransferSyntax.Encapsulated
+        };
+        var datasetBytes = bytes[offset..];
+        return new DicomFileData(NativeDicomDataset.Parse(datasetBytes, syntax), syntax, meta);
+    }
+
+    private static bool IsLongVr(string vr) => vr is "OB" or "OD" or "OF" or "OL" or "OV" or "OW" or "SQ" or "UC" or "UR" or "UT" or "UN";
 }

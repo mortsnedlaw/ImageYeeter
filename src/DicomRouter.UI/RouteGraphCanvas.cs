@@ -12,9 +12,11 @@ public sealed class RouteGraphCanvas : Canvas
     public static readonly DependencyProperty NodesProperty = DependencyProperty.Register(nameof(Nodes), typeof(IEnumerable), typeof(RouteGraphCanvas), new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
     public static readonly DependencyProperty EdgesProperty = DependencyProperty.Register(nameof(Edges), typeof(IEnumerable), typeof(RouteGraphCanvas), new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
     private GraphNode? _dragNode;
+    private GraphNode? _connectFrom;
     private Point _dragOffset;
     public IEnumerable? Nodes { get => (IEnumerable?)GetValue(NodesProperty); set => SetValue(NodesProperty, value); }
     public IEnumerable? Edges { get => (IEnumerable?)GetValue(EdgesProperty); set => SetValue(EdgesProperty, value); }
+    public Action<GraphEdge>? EdgeCreated { get; set; }
 
     protected override void OnRender(DrawingContext drawingContext)
     {
@@ -40,12 +42,28 @@ public sealed class RouteGraphCanvas : Canvas
     {
         var point = e.GetPosition(this);
         _dragNode = Nodes?.Cast<GraphNode>().LastOrDefault(node => new Rect(node.X, node.Y, 170, 84).Contains(point));
-        if (_dragNode != null) { _dragOffset = new Point(point.X - _dragNode.X, point.Y - _dragNode.Y); CaptureMouse(); }
+        if (_dragNode != null) { if (point.X >= _dragNode.X + 145) _connectFrom = _dragNode; _dragOffset = new Point(point.X - _dragNode.X, point.Y - _dragNode.Y); CaptureMouse(); }
     }
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        if (_dragNode == null || e.LeftButton != MouseButtonState.Pressed) return;
+        if (_connectFrom != null || _dragNode == null || e.LeftButton != MouseButtonState.Pressed) return;
         var point = e.GetPosition(this); _dragNode.X = Math.Max(0, point.X - _dragOffset.X); _dragNode.Y = Math.Max(0, point.Y - _dragOffset.Y); InvalidateVisual();
     }
-    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e) { if (_dragNode != null) { ReleaseMouseCapture(); _dragNode = null; } }
+    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+    {
+        var point = e.GetPosition(this);
+        if (_connectFrom != null)
+        {
+            var target = Nodes?.Cast<GraphNode>().LastOrDefault(node => node != _connectFrom && new Rect(node.X, node.Y, 170, 84).Contains(point));
+            if (target != null)
+            {
+                var edge = new GraphEdge { FromNodeId = _connectFrom.Id, ToNodeId = target.Id };
+                if (Edges is IList edgeList && !Edges.Cast<GraphEdge>().Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId)) edgeList.Add(edge);
+                EdgeCreated?.Invoke(edge);
+            }
+            _connectFrom = null;
+        }
+        if (_dragNode != null) { ReleaseMouseCapture(); _dragNode = null; }
+        InvalidateVisual();
+    }
 }

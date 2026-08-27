@@ -19,9 +19,10 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private readonly ConfigurationStore _configurationStore = new();
     private readonly ListenerManager _listenerManager;
     private RouterConfiguration _configuration = new();
-    private readonly DicomForwarder _forwarder = new();
+    private readonly DicomForwarder _forwarder;
     private readonly RuleEvaluator _evaluator = new();
     private readonly Spooler _spooler;
+    private readonly RuntimeEventBus _runtimeEvents = new();
     private readonly DispatcherTimer _timer;
     private bool _scpRunning;
     private string _scpState = "STOPPED";
@@ -92,7 +93,8 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
     public MainWindowViewModel()
     {
-        _listenerManager = new ListenerManager(OnReceivedAsync);
+        _forwarder = new DicomForwarder { Events = _runtimeEvents };
+        _listenerManager = new ListenerManager(OnReceivedAsync, _runtimeEvents);
         StartScpCommand = new AsyncCommand(StartScpAsync, () => !ScpRunning);
         StopScpCommand = new AsyncCommand(StopScpAsync, () => ScpRunning);
         AddRuleCommand = new ActionCommand(() => Rules.Add(new RuleEditorRow { Name = "New rule", Priority = Rules.Count + 1 }));
@@ -116,7 +118,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         _spooler = new Spooler(Path.Combine(AppContext.BaseDirectory, "spool"), _forwarder, Destinations.ToArray());
         _spooler.StartProcessing();
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _timer.Tick += (_, _) => { Throughput = IncomingImages == 0 ? 0 : Math.Round(0.02 + QueueDepth * 0.001, 2); RefreshSpool(); OnPropertyChanged(nameof(QueueDepth)); OnPropertyChanged(nameof(FailedDeliveries)); };
+        _timer.Tick += (_, _) => { DrainRuntimeEvents(); Throughput = IncomingImages == 0 ? 0 : Math.Round(0.02 + QueueDepth * 0.001, 2); RefreshSpool(); OnPropertyChanged(nameof(QueueDepth)); OnPropertyChanged(nameof(FailedDeliveries)); };
         _timer.Start();
     }
 
@@ -128,6 +130,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task StopScpAsync() { foreach (var listener in Listeners.ToArray()) await _listenerManager.StopAsync(listener.Configuration.Id); foreach (var listener in Listeners) listener.Status = "Stopped"; ScpRunning = false; ScpState = "STOPPED"; AddEvent("Association", "SCP stopped", "Info"); }
     private async Task TestEchoAsync() { var watch = System.Diagnostics.Stopwatch.StartNew(); ToolResult = $"C-ECHO to {TestAeTitle}@{TestHost}:{TestPort}..."; var ok = await _forwarder.EchoAsync(TestHost, TestPort, TestAeTitle, TestCallingAe); watch.Stop(); ToolResult = ok ? $"Success · {watch.ElapsedMilliseconds} ms · 1 presentation context" : "Failed · no association"; AddEvent("DIMSE", $"C-ECHO {TestAeTitle}: {ToolResult}", ok ? "Info" : "Error"); }
+    private void DrainRuntimeEvents() { var count = 0; while (count++ < 250 && _runtimeEvents.TryRead(out var runtimeEvent)) AddEvent(runtimeEvent.Type.ToString(), runtimeEvent.Message, runtimeEvent.Type == RuntimeEventType.Error || runtimeEvent.Type == RuntimeEventType.ForwardFailed ? "Error" : "Info"); }
 
     private async Task OnReceivedAsync(DicomReceivedEventArgs args)
     {
@@ -143,7 +146,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
     private void RefreshInspector() { InspectorTags.Clear(); if (_inspectedDataset == null) return; foreach (var element in _inspectedDataset.Elements.Where(x => string.IsNullOrWhiteSpace(InspectorFilter) || $"{x.Tag} {x.VR} {x.Text}".Contains(InspectorFilter, StringComparison.OrdinalIgnoreCase))) InspectorTags.Add(new InspectorTag($"({element.Tag})", element.Tag.ToString(), element.Value.Length > 1024 ? $"<binary {element.Value.Length} bytes>" : element.Text, false)); }
     private void OpenLocalFile() { var dialog = new OpenFileDialog { Filter = "DICOM files (*.dcm;*.*)|*.dcm;*.*", Multiselect = false }; if (dialog.ShowDialog() == true) { TestFilePath = dialog.FileName; DumpSelectedFile(); } }
-    private void DumpSelectedFile() { try { _inspectedDataset = NativeDicomDataset.Parse(File.ReadAllBytes(TestFilePath), DicomTransferSyntax.ExplicitVrLittleEndian); RefreshInspector(); ToolResult = $"Parsed {_inspectedDataset.Elements.Count} elements from {Path.GetFileName(TestFilePath)}"; } catch (Exception ex) { ToolResult = $"DICOM parse failed: {ex.Message}"; } }
+    private void DumpSelectedFile() { try { var file = DicomFileParser.Parse(File.ReadAllBytes(TestFilePath)); _inspectedDataset = file.Dataset; RefreshInspector(); ToolResult = $"Parsed {_inspectedDataset.Elements.Count} elements ({file.TransferSyntax}) from {Path.GetFileName(TestFilePath)}"; } catch (Exception ex) { ToolResult = $"DICOM parse failed: {ex.Message}"; } }
     private void SimulateSelectedFile() { try { if (_inspectedDataset == null) DumpSelectedFile(); if (_inspectedDataset == null) return; var metadata = DicomMetadataForSimulation(_inspectedDataset); var matches = _evaluator.Evaluate(metadata, _configuration.Rules); ToolResult = matches.Count == 0 ? "No rules matched. Nothing would be sent." : $"Matched without sending: {string.Join(", ", matches)}"; } catch (Exception ex) { ToolResult = $"Route simulation failed: {ex.Message}"; } }
     private static IDictionary<string, string> DicomMetadataForSimulation(NativeDicomDataset dataset) => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Modality"] = dataset.Get(DicomTag.Modality), ["SeriesDescription"] = dataset.Get(DicomTag.SeriesDescription), ["PatientID"] = dataset.Get(DicomTag.PatientId), ["BodyPartExamined"] = dataset.Get(DicomTag.BodyPartExamined), ["SOPClassUID"] = dataset.Get(DicomTag.SOPClassUid), ["StudyDate"] = dataset.Get(DicomTag.StudyDate) };
     private void RefreshSpool()

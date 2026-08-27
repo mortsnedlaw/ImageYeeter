@@ -17,5 +17,6 @@ namespace DicomRouter.Infrastructure.Models
         public int MaxAttempts { get; set; } = 5;
         public int MaxParallelSends { get; set; } = 1;
         public bool Enabled { get; set; } = true;
+        public int MaxPduSize { get; set; } = 16 * 1024;
     }
 }

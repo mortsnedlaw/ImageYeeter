@@ -15,6 +15,8 @@ namespace DicomRouter.UI
             InitializeComponent();
             _viewModel = new MainWindowViewModel();
             DataContext = _viewModel;
+            if (FindName("RouteGraph") is RouteGraphCanvas graph)
+                graph.EdgeCreated = edge => { if (!_viewModel.GraphEdges.Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId)) _viewModel.GraphEdges.Add(edge); };
         }
 
         protected override void OnClosed(EventArgs e)

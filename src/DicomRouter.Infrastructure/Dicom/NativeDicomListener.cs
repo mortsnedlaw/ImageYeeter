@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using DicomRouter.Infrastructure;
 
 namespace DicomRouter.Infrastructure.Dicom;
 
@@ -10,7 +11,21 @@ public sealed class NativeDicomListener : IDicomListener
     private CancellationTokenSource? _stop;
     private Task? _acceptLoop;
     private string _aeTitle = string.Empty;
+    private readonly int _maxPduSize;
+    private readonly SemaphoreSlim _associationSlots;
+    private readonly TimeSpan _associationTimeout;
+    private readonly TimeSpan _receiveTimeout;
+    private readonly IRuntimeEventBus? _events;
     public event Func<DicomReceivedEventArgs, Task>? OnDicomReceived;
+
+    public NativeDicomListener(int maxPduSize = 16 * 1024 * 1024, int maxAssociations = 32, int associationTimeoutSeconds = 30, int receiveTimeoutSeconds = 60, IRuntimeEventBus? events = null)
+    {
+        _maxPduSize = Math.Clamp(maxPduSize, 1024, 64 * 1024 * 1024);
+        _associationSlots = new SemaphoreSlim(Math.Max(1, maxAssociations));
+        _associationTimeout = TimeSpan.FromSeconds(Math.Max(1, associationTimeoutSeconds));
+        _receiveTimeout = TimeSpan.FromSeconds(Math.Max(1, receiveTimeoutSeconds));
+        _events = events;
+    }
 
     public Task StartAsync(string aeTitle, string ip, int port)
     {
@@ -33,15 +48,22 @@ public sealed class NativeDicomListener : IDicomListener
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken serverToken)
     {
+        if (!await _associationSlots.WaitAsync(TimeSpan.Zero, serverToken).ConfigureAwait(false))
+        {
+            client.Dispose();
+            return;
+        }
         using (client)
         using (var stream = client.GetStream())
         using (var linked = CancellationTokenSource.CreateLinkedTokenSource(serverToken))
         {
             try
             {
-                var (type, body) = await DicomProtocol.ReadPduAsync(stream, linked.Token).ConfigureAwait(false);
+                linked.CancelAfter(_associationTimeout);
+                var (type, body) = await DicomProtocol.ReadPduAsync(stream, linked.Token, _maxPduSize).ConfigureAwait(false);
                 if (type != PduType.AssociateRequest) return;
                 var request = DicomProtocol.ParseAssociateRequest(body);
+                _events?.Publish(new RuntimeEvent(RuntimeEventType.AssociationOpened, DateTime.UtcNow, $"{request.CallingAe} -> {_aeTitle}"));
                 if (!string.Equals(request.CalledAe, _aeTitle, StringComparison.OrdinalIgnoreCase))
                 {
                     await DicomProtocol.WritePduAsync(stream, PduType.Reject, DicomProtocol.BuildAssociateReject(), linked.Token).ConfigureAwait(false);
@@ -49,16 +71,22 @@ public sealed class NativeDicomListener : IDicomListener
                 }
                 var accepted = request.Contexts.Select(context => context with
                 {
-                    Accepted = context.AbstractSyntax is "1.2.840.10008.1.1" or "1.2.840.10008.5.1.4.1.1.2" or "1.2.840.10008.5.1.4.1.1.4"
-                        && context.TransferSyntax is "1.2.840.10008.1.2" or "1.2.840.10008.1.2.1",
-                    TransferSyntax = context.TransferSyntax is "1.2.840.10008.1.2" ? context.TransferSyntax : "1.2.840.10008.1.2.1"
+                    Accepted = context.AbstractSyntax is "1.2.840.10008.1.1" or "1.2.840.10008.5.1.4.1.1.2" or "1.2.840.10008.5.1.4.1.1.4",
+                    TransferSyntax = context.TransferSyntax
                 }).ToList();
+                if (!accepted.Any(x => x.Accepted))
+                {
+                    await DicomProtocol.WritePduAsync(stream, PduType.Reject, DicomProtocol.BuildAssociateReject(1, 1, 3), linked.Token).ConfigureAwait(false);
+                    return;
+                }
                 await DicomProtocol.WritePduAsync(stream, PduType.AssociateAccept, DicomProtocol.BuildAssociateAccept(_aeTitle, request.CallingAe, accepted.Where(x => x.Accepted)), linked.Token).ConfigureAwait(false);
+                linked.CancelAfter(_receiveTimeout);
                 await MessageLoopAsync(stream, accepted, request.CallingAe, linked.Token).ConfigureAwait(false);
             }
             catch (EndOfStreamException) { }
             catch (OperationCanceledException) { }
             catch { try { await DicomProtocol.WritePduAsync(stream, PduType.Abort, new byte[] { 0, 0, 0, 0 }, CancellationToken.None); } catch { } }
+            finally { _associationSlots.Release(); }
         }
     }
 
@@ -67,7 +95,7 @@ public sealed class NativeDicomListener : IDicomListener
         var command = new MemoryStream(); var dataset = new MemoryStream(); byte contextId = 0; var commandComplete = false;
         while (!ct.IsCancellationRequested)
         {
-            var (type, body) = await DicomProtocol.ReadPduAsync(stream, ct).ConfigureAwait(false);
+            var (type, body) = await DicomProtocol.ReadPduAsync(stream, ct, _maxPduSize).ConfigureAwait(false);
             if (type == PduType.ReleaseRequest) { await DicomProtocol.WritePduAsync(stream, PduType.ReleaseResponse, Array.Empty<byte>(), ct); return; }
             if (type == PduType.Abort) return;
             if (type != PduType.Data) continue;
@@ -112,12 +140,14 @@ public sealed class NativeDicomListener : IDicomListener
             return;
         }
         if (field != 0x0001 || data == null) return;
-        var dataset = NativeDicomDataset.Parse(data, context.TransferSyntax == "1.2.840.10008.1.2" ? DicomTransferSyntax.ImplicitVrLittleEndian : DicomTransferSyntax.ExplicitVrLittleEndian);
-        var args = new DicomReceivedEventArgs { Dataset = dataset, RawDataset = data, Metadata = DicomMetadata.Extract(dataset), RemoteAET = remoteAe };
+        var syntax = context.TransferSyntax == "1.2.840.10008.1.2" ? DicomTransferSyntax.ImplicitVrLittleEndian : DicomTransferSyntax.ExplicitVrLittleEndian;
+        var dataset = NativeDicomDataset.Parse(data, syntax);
+        var args = new DicomReceivedEventArgs { Dataset = dataset, RawDataset = data, TransferSyntaxUid = context.TransferSyntax, Metadata = DicomMetadata.Extract(dataset), RemoteAET = remoteAe };
+        _events?.Publish(new RuntimeEvent(RuntimeEventType.DicomObjectReceived, DateTime.UtcNow, $"C-STORE {dataset.Get(DicomTag.SOPInstanceUid)}", Data: new Dictionary<string, string> { ["TransferSyntax"] = context.TransferSyntax }));
         ushort status = 0;
         try { if (OnDicomReceived != null) await OnDicomReceived(args).ConfigureAwait(false); }
         catch { status = 0x0110; }
-        var responseCommand = DicomProtocol.BuildCommand(0x8001, messageId, 0x0101, dataset.Get(DicomTag.SOPClassUid), status: status);
+        var responseCommand = DicomProtocol.BuildCommand(0x8001, messageId, 0x0101, dataset.Get(DicomTag.SOPClassUid), sopInstance: dataset.Get(DicomTag.SOPInstanceUid), status: status);
         await DicomProtocol.WritePduAsync(stream, PduType.Data, DicomProtocol.BuildDataPdu(contextId, 0, responseCommand), ct).ConfigureAwait(false);
     }
 
@@ -128,7 +158,7 @@ public sealed class NativeDicomListener : IDicomListener
         _acceptLoop = null; _listener = null; _stop?.Dispose(); _stop = null;
     }
 
-    public void Dispose() { StopAsync().GetAwaiter().GetResult(); }
+    public void Dispose() { StopAsync().GetAwaiter().GetResult(); _associationSlots.Dispose(); }
 }
 
 internal static class DicomMetadata
