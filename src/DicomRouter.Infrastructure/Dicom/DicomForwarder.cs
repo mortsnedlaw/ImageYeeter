@@ -1,36 +1,99 @@
-using System;
-using System.Threading.Tasks;
-using FellowOakDicom.Network.Client;
-using FellowOakDicom;
+using System.Net.Sockets;
+using System.Threading;
 using DicomRouter.Infrastructure.Models;
 
 namespace DicomRouter.Infrastructure.Dicom
 {
     /// <summary>
-    /// Forwards datasets to destination SCPs using fo-dicom DicomClient.
+    /// Forwards stored datasets using a native DICOM association.
     /// </summary>
     public class DicomForwarder
     {
         /// <summary>
         /// Sends the provided dataset to the destination endpoint.
         /// </summary>
-        public async Task<bool> ForwardAsync(DicomDataset dataset, Destination dest, string callingAET = "DICOMROUTER")
+        private int _messageId;
+        public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+        public async Task<bool> EchoAsync(string host, int port, string calledAETitle, string callingAETitle, CancellationToken cancellationToken = default)
         {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(Timeout);
+            using var client = new TcpClient();
             try
             {
-                var client = new DicomClient();
-                client.NegotiateAsyncOps();
-
-                var request = new DicomCStoreRequest(new DicomFile(dataset));
-                await client.AddRequestAsync(request).ConfigureAwait(false);
-
-                await client.SendAsync(dest.Host, dest.Port, dest.UseTls, callingAET, dest.AeTitle).ConfigureAwait(false);
-                return true;
+                await client.ConnectAsync(host, port, timeout.Token).ConfigureAwait(false);
+                await using var stream = client.GetStream();
+                await DicomProtocol.WritePduAsync(stream, PduType.AssociateRequest, DicomProtocol.BuildAssociateRequest(callingAETitle, calledAETitle, new[] { "1.2.840.10008.1.1" }), timeout.Token).ConfigureAwait(false);
+                var association = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
+                if (association.Type != PduType.AssociateAccept) return false;
+                var context = DicomProtocol.ParseAssociateAccept(association.Body).FirstOrDefault(x => x.Accepted);
+                if (context == null) return false;
+                var id = (ushort)Interlocked.Increment(ref _messageId);
+                var command = DicomProtocol.BuildCommand(0x0030, id, 0x0101, "1.2.840.10008.1.1");
+                await DicomProtocol.WritePduAsync(stream, PduType.Data, DicomProtocol.BuildDataPdu(context.Id, 0, command), timeout.Token).ConfigureAwait(false);
+                while (true)
+                {
+                    var response = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
+                    if (response.Type != PduType.Data) return false;
+                    foreach (var pdv in DicomProtocol.ParseDataPdu(response.Body))
+                    {
+                        var responseCommand = NativeDicomDataset.Parse(pdv.Payload, DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        if (responseCommand.GetUInt16(DicomTag.MessageIdBeingRespondedTo) == id)
+                        {
+                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, Array.Empty<byte>(), timeout.Token).ConfigureAwait(false);
+                            return responseCommand.GetUInt16(DicomTag.Status) == 0;
+                        }
+                    }
+                }
             }
-            catch (Exception)
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { return false; }
+            catch (SocketException) { return false; }
+            catch (IOException) { return false; }
+        }
+
+        public async Task<bool> ForwardAsync(NativeDicomDataset dataset, Destination dest, string callingAET = "DICOMROUTER", CancellationToken cancellationToken = default)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(Timeout);
+            using var client = new TcpClient();
+            try
+            {
+                await client.ConnectAsync(dest.Host, dest.Port, timeout.Token).ConfigureAwait(false);
+                await using var stream = client.GetStream();
+                var sopClass = dataset.Get(DicomTag.SOPClassUid);
+                if (string.IsNullOrWhiteSpace(sopClass)) return false;
+                await DicomProtocol.WritePduAsync(stream, PduType.AssociateRequest, DicomProtocol.BuildAssociateRequest(callingAET, dest.AeTitle, new[] { sopClass }), timeout.Token).ConfigureAwait(false);
+                var association = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
+                if (association.Type != PduType.AssociateAccept) return false;
+                var context = DicomProtocol.ParseAssociateAccept(association.Body).FirstOrDefault(x => x.Accepted);
+                if (context == null) return false;
+                var messageId = (ushort)Interlocked.Increment(ref _messageId);
+                var command = DicomProtocol.BuildCommand(0x0001, messageId, 0x0000, sopClass);
+                await DicomProtocol.WritePduAsync(stream, PduType.Data, DicomProtocol.BuildDataPdu(context.Id, 0, command, dataset.OriginalBytes), timeout.Token).ConfigureAwait(false);
+                while (true)
+                {
+                    var response = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
+                    if (response.Type == PduType.Abort || response.Type == PduType.ReleaseRequest) return false;
+                    if (response.Type != PduType.Data) continue;
+                    foreach (var pdv in DicomProtocol.ParseDataPdu(response.Body))
+                    {
+                        var responseCommand = NativeDicomDataset.Parse(pdv.Payload, DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        if (responseCommand.GetUInt16(DicomTag.MessageIdBeingRespondedTo) == messageId)
+                        {
+                            var status = responseCommand.GetUInt16(DicomTag.Status);
+                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, Array.Empty<byte>(), timeout.Token).ConfigureAwait(false);
+                            return status == 0;
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
                 return false;
             }
+            catch (SocketException) { return false; }
+            catch (IOException) { return false; }
         }
     }
 }

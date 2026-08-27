@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using DicomRouter.Core.Models;
 
 namespace DicomRouter.Core.Services
@@ -19,15 +20,7 @@ namespace DicomRouter.Core.Services
 
             foreach (var rule in sorted)
             {
-                bool allTrue = true;
-                foreach (var cond in rule.Conditions)
-                {
-                    if (!EvaluateCondition(metadata, cond))
-                    {
-                        allTrue = false;
-                        break;
-                    }
-                }
+                var allTrue = rule.ConditionTree != null ? EvaluateGroup(metadata, rule.ConditionTree) : rule.Conditions.All(cond => EvaluateCondition(metadata, cond));
 
                 if (allTrue)
                 {
@@ -52,20 +45,34 @@ namespace DicomRouter.Core.Services
                     return string.Equals(raw, cmp, StringComparison.OrdinalIgnoreCase);
                 case ConditionOperator.NotEquals:
                     return !string.Equals(raw, cmp, StringComparison.OrdinalIgnoreCase);
+                case ConditionOperator.Exists:
+                    return metadata.ContainsKey(cond.Field) && !string.IsNullOrEmpty(raw);
+                case ConditionOperator.DoesNotExist:
+                    return !metadata.ContainsKey(cond.Field) || string.IsNullOrEmpty(raw);
                 case ConditionOperator.Contains:
                     return raw.IndexOf(cmp, StringComparison.OrdinalIgnoreCase) >= 0;
+                case ConditionOperator.DoesNotContain:
+                    return raw.IndexOf(cmp, StringComparison.OrdinalIgnoreCase) < 0;
                 case ConditionOperator.StartsWith:
                     return raw.StartsWith(cmp, StringComparison.OrdinalIgnoreCase);
+                case ConditionOperator.EndsWith:
+                    return raw.EndsWith(cmp, StringComparison.OrdinalIgnoreCase);
+                case ConditionOperator.Regex:
+                    try { return Regex.IsMatch(raw, cmp, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)); } catch (ArgumentException) { return false; }
                 case ConditionOperator.GreaterThan:
                     if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var d1) &&
                         double.TryParse(cmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var d2))
                         return d1 > d2;
                     return false;
+                case ConditionOperator.GreaterThanOrEqual:
+                    return double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var ge1) && double.TryParse(cmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var ge2) && ge1 >= ge2;
                 case ConditionOperator.LessThan:
                     if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var ld1) &&
                         double.TryParse(cmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var ld2))
                         return ld1 < ld2;
                     return false;
+                case ConditionOperator.LessThanOrEqual:
+                    return double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out var le1) && double.TryParse(cmp, NumberStyles.Any, CultureInfo.InvariantCulture, out var le2) && le1 <= le2;
                 case ConditionOperator.BeforeDate:
                     if (DateTime.TryParseExact(raw, new[] {"yyyyMMdd", "yyyy-MM-dd"}, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt1) &&
                         DateTime.TryParseExact(cmp, new[] {"yyyyMMdd", "yyyy-MM-dd"}, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt2))
@@ -79,6 +86,13 @@ namespace DicomRouter.Core.Services
                 default:
                     return false;
             }
+        }
+
+        private bool EvaluateGroup(IDictionary<string, string> metadata, ConditionGroup group)
+        {
+            var values = group.Conditions.Select(x => EvaluateCondition(metadata, x)).Concat(group.Groups.Select(x => EvaluateGroup(metadata, x))).ToList();
+            var result = group.Operator == ConditionGroupOperator.And ? values.All(x => x) : values.Any(x => x);
+            return group.Negate ? !result : result;
         }
     }
 }

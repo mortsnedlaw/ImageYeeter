@@ -26,6 +26,7 @@ namespace DicomRouter.Core.Models
         /// Conditions that must all be true for a match (AND semantics).
         /// </summary>
         public List<Condition> Conditions { get; set; } = new List<Condition>();
+        public ConditionGroup? ConditionTree { get; set; }
 
         /// <summary>
         /// Destination names to forward to when matched.

@@ -1,6 +1,4 @@
 using System.Collections.Generic;
-using FellowOakDicom;
-
 namespace DicomRouter.Infrastructure.Dicom
 {
     /// <summary>
@@ -11,7 +9,8 @@ namespace DicomRouter.Infrastructure.Dicom
         /// <summary>
         /// The dataset that was received.
         /// </summary>
-        public DicomDataset Dataset { get; set; } = new DicomDataset();
+        public NativeDicomDataset Dataset { get; set; } = new NativeDicomDataset(Array.Empty<DicomElement>());
+        public byte[] RawDataset { get; set; } = Array.Empty<byte>();
 
         /// <summary>
         /// Metadata dictionary extracted from the dataset for quick evaluation.

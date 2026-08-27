@@ -5,7 +5,6 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using FellowOakDicom;
 using DicomRouter.Infrastructure.Models;
 
 namespace DicomRouter.Infrastructure.Dicom
@@ -34,20 +33,26 @@ namespace DicomRouter.Infrastructure.Dicom
             Directory.CreateDirectory(_spoolFolder);
         }
 
-        public async Task EnqueueAsync(DicomDataset dataset, IEnumerable<string> destinationNames, IDictionary<string, string>? tagOverrides = null, string callingAET = "")
+        public async Task EnqueueAsync(NativeDicomDataset dataset, IEnumerable<string> destinationNames, IDictionary<string, string>? tagOverrides = null, string callingAET = "")
         {
             var id = Guid.NewGuid().ToString("N");
             var dcmPath = Path.Combine(_spoolFolder, id + ".dcm");
             var metaPath = Path.Combine(_spoolFolder, id + ".json");
 
-            var file = new DicomFile(dataset);
-            await Task.Run(() => file.Save(dcmPath)).ConfigureAwait(false);
+            var tempPath = dcmPath + ".tmp";
+            await using (var file = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                await file.WriteAsync(dataset.OriginalBytes).ConfigureAwait(false);
+                await file.FlushAsync().ConfigureAwait(false);
+            }
+            File.Move(tempPath, dcmPath);
 
             var item = new SpoolItem
             {
                 Id = id,
                 DicomFileName = Path.GetFileName(dcmPath),
                 DestinationNames = destinationNames?.ToList() ?? new List<string>(),
+                Destinations = (destinationNames ?? Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase).Select(name => new DestinationDelivery { Name = name }).ToList(),
                 TagOverrides = tagOverrides != null ? new Dictionary<string, string>(tagOverrides, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                 Attempts = 0,
                 NextAttemptUtc = DateTime.UtcNow,
@@ -56,7 +61,9 @@ namespace DicomRouter.Infrastructure.Dicom
             };
 
             var json = JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(metaPath, json).ConfigureAwait(false);
+            var metaTempPath = metaPath + ".tmp";
+            await File.WriteAllTextAsync(metaTempPath, json).ConfigureAwait(false);
+            File.Move(metaTempPath, metaPath);
         }
 
         public void StartProcessing()
@@ -108,6 +115,8 @@ namespace DicomRouter.Infrastructure.Dicom
                         }
 
                         if (item == null) continue;
+                        if (item.Destinations.Count == 0 && item.DestinationNames.Count > 0)
+                            item.Destinations = item.DestinationNames.Select(name => new DestinationDelivery { Name = name }).ToList();
 
                         if (item.NextAttemptUtc > DateTime.UtcNow) continue;
 
@@ -119,33 +128,20 @@ namespace DicomRouter.Infrastructure.Dicom
                             continue;
                         }
 
-                        var file = await Task.Run(() => DicomFile.Open(dcmPath), ct).ConfigureAwait(false);
-                        var ds = file.Dataset;
-
-                        bool allSucceeded = true;
-
-                        foreach (var destName in item.DestinationNames)
+                        var raw = await File.ReadAllBytesAsync(dcmPath, ct).ConfigureAwait(false);
+                        var ds = NativeDicomDataset.Parse(raw, DicomTransferSyntax.ExplicitVrLittleEndian);
+                        var pending = item.Destinations.Where(x => !x.Succeeded).Select(async status =>
                         {
-                            var dest = _destinations.FirstOrDefault(d => string.Equals(d.Name, destName, StringComparison.OrdinalIgnoreCase));
-                            if (dest == null)
-                            {
-                                allSucceeded = false; // destination unknown - treat as failure so it will retry (or admin can fix)
-                                continue;
-                            }
-
-                            try
-                            {
-                                var success = await _forwarder.ForwardAsync(ds, dest, item.CallingAET).ConfigureAwait(false);
-                                if (!success)
-                                {
-                                    allSucceeded = false;
-                                }
-                            }
-                            catch
-                            {
-                                allSucceeded = false;
-                            }
-                        }
+                            var dest = _destinations.FirstOrDefault(d => string.Equals(d.Name, status.Name, StringComparison.OrdinalIgnoreCase));
+                            status.Attempts++;
+                            status.LastAttemptUtc = DateTime.UtcNow;
+                            status.LastError = dest == null ? "Unknown destination" : string.Empty;
+                            status.Succeeded = dest != null && await _forwarder.ForwardAsync(ds, dest, item.CallingAET, ct).ConfigureAwait(false);
+                            if (!status.Succeeded && string.IsNullOrEmpty(status.LastError)) status.LastError = "C-STORE failed";
+                            status.NextRetryUtc = DateTime.UtcNow.AddSeconds(_baseRetrySeconds * Math.Pow(2, Math.Max(0, status.Attempts - 1)));
+                        });
+                        await Task.WhenAll(pending).ConfigureAwait(false);
+                        var allSucceeded = item.Destinations.All(x => x.Succeeded);
 
                         if (allSucceeded)
                         {
@@ -158,8 +154,8 @@ namespace DicomRouter.Infrastructure.Dicom
                         }
                         else
                         {
-                            item.Attempts++;
-                            if (item.Attempts >= _maxAttempts)
+                            item.Attempts = item.Destinations.Count == 0 ? item.Attempts + 1 : item.Destinations.Max(x => x.Attempts);
+                            if (item.Destinations.Where(x => !x.Succeeded).All(x => x.Attempts >= _maxAttempts))
                             {
                                 // move to failed folder
                                 var failedDir = Path.Combine(_spoolFolder, "failed");
