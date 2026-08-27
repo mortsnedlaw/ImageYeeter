@@ -17,6 +17,7 @@ namespace DicomRouter.Infrastructure.Dicom
         public DateTime NextAttemptUtc { get; set; } = DateTime.UtcNow;
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
         public string CallingAET { get; set; } = string.Empty;
+        public DicomTransferSyntax TransferSyntax { get; set; } = DicomTransferSyntax.ExplicitVrLittleEndian;
     }
 
     public sealed class DestinationDelivery
@@ -27,5 +28,6 @@ namespace DicomRouter.Infrastructure.Dicom
         public string LastError { get; set; } = string.Empty;
         public DateTime LastAttemptUtc { get; set; }
         public DateTime NextRetryUtc { get; set; }
+        public bool Cancelled { get; set; }
     }
 }

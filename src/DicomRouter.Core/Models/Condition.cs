@@ -8,6 +8,9 @@ namespace DicomRouter.Core.Models
     /// </summary>
     public class Condition
     {
+        public uint Tag { get; set; }
+        public string FriendlyName { get; set; } = string.Empty;
+
         /// <summary>
         /// The metadata field name (e.g., "Modality", "SliceThickness").
         /// </summary>

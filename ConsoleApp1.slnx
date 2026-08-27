@@ -1,3 +1,6 @@
 <Solution>
-  <Project Path="ImageYeeter.csproj" />
+  <Project Path="src/DicomRouter.Core/DicomRouter.Core.csproj" />
+  <Project Path="src/DicomRouter.Infrastructure/DicomRouter.Infrastructure.csproj" />
+  <Project Path="src/DicomRouter.Service/DicomRouter.Service.csproj" />
+  <Project Path="src/DicomRouter.UI/DicomRouter.UI.csproj" />
 </Solution>

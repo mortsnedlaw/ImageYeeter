@@ -16,7 +16,7 @@ namespace DicomRouter.Infrastructure.Dicom
     {
         private readonly string _spoolFolder;
         private readonly DicomForwarder _forwarder;
-        private readonly Destination[] _destinations;
+        private Destination[] _destinations;
         private readonly int _baseRetrySeconds;
         private readonly int _maxAttempts;
         private CancellationTokenSource? _cts;
@@ -31,6 +31,31 @@ namespace DicomRouter.Infrastructure.Dicom
             _maxAttempts = maxAttempts;
 
             Directory.CreateDirectory(_spoolFolder);
+        }
+
+        public void UpdateDestinations(IEnumerable<Destination> destinations) => Volatile.Write(ref _destinations, destinations.ToArray());
+
+        public async Task RetryAsync(string? destinationName = null, CancellationToken cancellationToken = default)
+        {
+            foreach (var meta in Directory.EnumerateFiles(_spoolFolder, "*.json"))
+            {
+                var item = JsonSerializer.Deserialize<SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
+                if (item == null) continue;
+                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase))) { delivery.Cancelled = false; delivery.Succeeded = false; delivery.NextRetryUtc = DateTime.UtcNow; }
+                item.NextAttemptUtc = DateTime.UtcNow;
+                await File.WriteAllTextAsync(meta, JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }), cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public async Task CancelAsync(string? destinationName = null, CancellationToken cancellationToken = default)
+        {
+            foreach (var meta in Directory.EnumerateFiles(_spoolFolder, "*.json"))
+            {
+                var item = JsonSerializer.Deserialize<SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
+                if (item == null) continue;
+                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase))) delivery.Cancelled = true;
+                await File.WriteAllTextAsync(meta, JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }), cancellationToken).ConfigureAwait(false);
+            }
         }
 
         public async Task EnqueueAsync(NativeDicomDataset dataset, IEnumerable<string> destinationNames, IDictionary<string, string>? tagOverrides = null, string callingAET = "")
@@ -58,6 +83,7 @@ namespace DicomRouter.Infrastructure.Dicom
                 NextAttemptUtc = DateTime.UtcNow,
                 CreatedUtc = DateTime.UtcNow,
                 CallingAET = callingAET ?? string.Empty
+                ,TransferSyntax = dataset.TransferSyntax
             };
 
             var json = JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true });
@@ -129,8 +155,8 @@ namespace DicomRouter.Infrastructure.Dicom
                         }
 
                         var raw = await File.ReadAllBytesAsync(dcmPath, ct).ConfigureAwait(false);
-                        var ds = NativeDicomDataset.Parse(raw, DicomTransferSyntax.ExplicitVrLittleEndian);
-                        var pending = item.Destinations.Where(x => !x.Succeeded).Select(async status =>
+                        var ds = NativeDicomDataset.Parse(raw, item.TransferSyntax);
+                        var pending = item.Destinations.Where(x => !x.Succeeded && !x.Cancelled).Select(async status =>
                         {
                             var dest = _destinations.FirstOrDefault(d => string.Equals(d.Name, status.Name, StringComparison.OrdinalIgnoreCase));
                             status.Attempts++;

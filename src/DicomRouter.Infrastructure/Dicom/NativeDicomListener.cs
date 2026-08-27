@@ -98,7 +98,7 @@ public sealed class NativeDicomListener : IDicomListener
         {
             var (type, body) = await DicomProtocol.ReadPduAsync(stream, ct, _maxPduSize).ConfigureAwait(false);
             _events?.Publish(new RuntimeEvent(RuntimeEventType.ProtocolEvent, DateTime.UtcNow, $"PDU {type} ({body.Length} bytes)"));
-            if (type == PduType.ReleaseRequest) { await DicomProtocol.WritePduAsync(stream, PduType.ReleaseResponse, Array.Empty<byte>(), ct); return; }
+            if (type == PduType.ReleaseRequest) { await DicomProtocol.WritePduAsync(stream, PduType.ReleaseResponse, new byte[4], ct); return; }
             if (type == PduType.Abort) return;
             if (type != PduType.Data) continue;
             foreach (var pdv in DicomProtocol.ParseDataPdu(body))
@@ -165,14 +165,14 @@ public sealed class NativeDicomListener : IDicomListener
 
 internal static class DicomMetadata
 {
-    public static Dictionary<string, string> Extract(NativeDicomDataset dataset) => new(StringComparer.OrdinalIgnoreCase)
+    public static Dictionary<string, string> Extract(NativeDicomDataset dataset) => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["SliceThickness"] = dataset.Get(DicomTag.SliceThickness), ["Modality"] = dataset.Get(DicomTag.Modality),
         ["StudyDescription"] = dataset.Get(DicomTag.StudyDescription), ["SeriesDescription"] = dataset.Get(DicomTag.SeriesDescription),
         ["PatientID"] = dataset.Get(DicomTag.PatientId), ["BodyPartExamined"] = dataset.Get(DicomTag.BodyPartExamined),
         ["Rows"] = dataset.Get(DicomTag.Rows), ["Columns"] = dataset.Get(DicomTag.Columns), ["NumberOfSlices"] = dataset.Get(DicomTag.NumberOfFrames),
         ["SOPClassUID"] = dataset.Get(DicomTag.SOPClassUid), ["StudyDate"] = dataset.Get(DicomTag.StudyDate)
-    };
+    }.Concat(dataset.Elements.ToDictionary(x => $"({x.Tag.Group:X4},{x.Tag.Element:X4})", x => x.Text, StringComparer.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
 }
 
 internal static class DicomValueExtensions

@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -18,6 +19,17 @@ public sealed class RouteGraphCanvas : Canvas
     public IEnumerable? Edges { get => (IEnumerable?)GetValue(EdgesProperty); set => SetValue(EdgesProperty, value); }
     public Action<GraphEdge>? EdgeCreated { get; set; }
     public Action<GraphEdge>? EdgeDeleted { get; set; }
+    protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
+    {
+        base.OnPropertyChanged(e);
+        if (e.Property == EdgesProperty || e.Property == NodesProperty)
+        {
+            if (e.OldValue is INotifyCollectionChanged oldCollection) oldCollection.CollectionChanged -= CollectionChanged;
+            if (e.NewValue is INotifyCollectionChanged newCollection) newCollection.CollectionChanged += CollectionChanged;
+            InvalidateVisual();
+        }
+    }
+    private void CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e) => InvalidateVisual();
 
     protected override void OnRender(DrawingContext drawingContext)
     {

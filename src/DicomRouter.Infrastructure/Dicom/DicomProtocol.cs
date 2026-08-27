@@ -30,20 +30,21 @@ internal static class DicomProtocol
         await stream.WriteAsync(body, ct).ConfigureAwait(false);
     }
 
-    public static byte[] BuildAssociateRequest(string callingAe, string calledAe, IReadOnlyList<string> sopClasses)
+    public static byte[] BuildAssociateRequest(string callingAe, string calledAe, IReadOnlyList<string> sopClasses, DicomTransferSyntax transferSyntax = DicomTransferSyntax.ExplicitVrLittleEndian)
     {
         using var body = new MemoryStream();
         WriteUInt16(body, 1); WriteUInt16(body, 0);
         WriteFixed(body, calledAe, 16); WriteFixed(body, callingAe, 16); body.Write(new byte[32]);
         byte contextId = 1;
+        using var app = new MemoryStream(); WriteAsciiItem(app, 0x10, "1.2.840.10008.3.1.1.1"); WriteItem(body, 0x10, app.ToArray());
+        using var user = new MemoryStream(); using var maxPdu = new MemoryStream(); WriteUInt32Big(maxPdu, 16 * 1024); WriteItem(user, 0x51, maxPdu.ToArray()); WriteAsciiItem(user, 0x52, "1.2.826.0.1.3680043.10.5432.1"); WriteAsciiItem(user, 0x55, "IMAGEYEETER"); WriteItem(body, 0x50, user.ToArray());
         foreach (var sop in sopClasses.Distinct(StringComparer.Ordinal))
         {
             using var item = new MemoryStream();
             item.WriteByte(contextId); item.WriteByte(0); WriteAsciiItem(item, 0x30, sop);
-            WriteAsciiItem(item, 0x40, "1.2.840.10008.1.2.1");
+            WriteAsciiItem(item, 0x40, transferSyntax == DicomTransferSyntax.ImplicitVrLittleEndian ? "1.2.840.10008.1.2" : "1.2.840.10008.1.2.1");
             WriteItem(body, 0x20, item.ToArray()); contextId += 2;
         }
-        using var app = new MemoryStream(); WriteAsciiItem(app, 0x10, "1.2.840.10008.3.1.1.1"); WriteAsciiItem(app, 0x20, "1.2.840.10008.1.2.0"); WriteItem(body, 0x10, app.ToArray());
         return body.ToArray();
     }
 
@@ -94,26 +95,50 @@ internal static class DicomProtocol
         return contexts;
     }
 
+    public static int ParseMaximumPduLength(byte[] body)
+    {
+        var offset = 68;
+        while (offset + 4 <= body.Length)
+        {
+            var type = body[offset]; var length = BinaryPrimitives.ReadUInt16BigEndian(body.AsSpan(offset + 2));
+            if (offset + 4 + length > body.Length) break;
+            if (type == 0x50)
+            {
+                var item = body.AsSpan(offset + 4, length); var position = 0;
+                while (position + 4 <= item.Length)
+                {
+                    var subType = item[position]; var subLength = BinaryPrimitives.ReadUInt16BigEndian(item.Slice(position + 2));
+                    if (position + 4 + subLength > item.Length) break;
+                    if (subType == 0x51 && subLength == 4) return checked((int)BinaryPrimitives.ReadUInt32BigEndian(item.Slice(position + 4, 4)));
+                    position += 4 + subLength;
+                }
+            }
+            offset += 4 + length;
+        }
+        return 16 * 1024;
+    }
+
     public static byte[] BuildAssociateAccept(string calledAe, string callingAe, IEnumerable<PresentationContext> contexts)
     {
-        var body = new byte[74]; BinaryPrimitives.WriteUInt16BigEndian(body.AsSpan(), 1); BinaryPrimitives.WriteUInt16BigEndian(body.AsSpan(2), 0);
+        var body = new byte[68]; BinaryPrimitives.WriteUInt16BigEndian(body.AsSpan(), 1); BinaryPrimitives.WriteUInt16BigEndian(body.AsSpan(2), 0);
         WriteFixed(body, 4, calledAe, 16); WriteFixed(body, 20, callingAe, 16);
         using var tail = new MemoryStream();
-        foreach (var context in contexts) { var item = new byte[] { context.Id, 0, 0, 0 }; using var content = new MemoryStream(); content.WriteByte(context.Id); content.WriteByte(0); WriteAsciiItem(content, 0x40, context.TransferSyntax); var data = content.ToArray(); WriteItem(tail, 0x21, data); }
-        using var app = new MemoryStream(); WriteAsciiItem(app, 0x10, "1.2.840.10008.3.1.1.1"); WriteAsciiItem(app, 0x20, "1.2.840.10008.1.2.0"); WriteItem(tail, 0x10, app.ToArray());
+        foreach (var context in contexts) { using var content = new MemoryStream(); content.WriteByte(context.Id); content.WriteByte(0); content.WriteByte(context.Accepted ? (byte)0 : (byte)4); content.WriteByte(0); WriteAsciiItem(content, 0x40, context.TransferSyntax); WriteItem(tail, 0x21, content.ToArray()); }
+        using var app = new MemoryStream(); WriteAsciiItem(app, 0x10, "1.2.840.10008.3.1.1.1"); WriteItem(tail, 0x10, app.ToArray());
+        using var user = new MemoryStream(); using var maxPdu = new MemoryStream(); WriteUInt32Big(maxPdu, 16 * 1024); WriteItem(user, 0x51, maxPdu.ToArray()); WriteAsciiItem(user, 0x52, "1.2.826.0.1.3680043.10.5432.1"); WriteAsciiItem(user, 0x55, "IMAGEYEETER"); WriteItem(tail, 0x50, user.ToArray());
         return body.Concat(tail.ToArray()).ToArray();
     }
 
-    public static byte[] BuildAssociateReject(byte result = 1, byte source = 1, byte reason = 7) => new byte[] { 0, 0, result, source, reason };
+    public static byte[] BuildAssociateReject(byte result = 1, byte source = 1, byte reason = 7) => new byte[] { 0, 0, result, 0, source, 0, reason, 0 };
 
     public static byte[] BuildCommand(ushort commandField, ushort messageId, ushort datasetType, string sopClass, string? sopInstance = null, ushort status = 0)
     {
         var parts = new List<(DicomTag Tag, string Vr, byte[] Value)>();
         AddUs(parts, DicomTag.CommandField, commandField);
-        if (messageId != 0) AddUs(parts, DicomTag.MessageId, messageId);
+        if (messageId != 0) AddUs(parts, commandField is 0x8001 or 0x8030 ? DicomTag.MessageIdBeingRespondedTo : DicomTag.MessageId, messageId);
         if (sopClass.Length > 0) parts.Add((commandField is 0x0001 or 0x0030 or 0x8001 or 0x8030 ? DicomTag.AffectedSopClassUid : DicomTag.RequestedSopClassUid, "UI", PaddedUid(sopClass)));
         if (!string.IsNullOrWhiteSpace(sopInstance)) parts.Add((commandField == 0x0001 ? DicomTag.AffectedSopInstanceUid : DicomTag.RequestedSopInstanceUid, "UI", PaddedUid(sopInstance)));
-        AddUs(parts, DicomTag.CommandDataSetType, datasetType); if (status != 0) AddUs(parts, DicomTag.Status, status);
+        AddUs(parts, DicomTag.CommandDataSetType, datasetType); AddUs(parts, DicomTag.Status, status);
         var withoutLength = WriteCommandElements(parts); var result = new List<(DicomTag, string, byte[])> { (new DicomTag(0, 0), "UL", BitConverter.GetBytes((uint)withoutLength.Length)) }; result.AddRange(parts);
         return WriteCommandElements(result);
     }

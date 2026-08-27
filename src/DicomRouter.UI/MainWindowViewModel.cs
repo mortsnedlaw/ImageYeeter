@@ -87,6 +87,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     public ICommand CancelCommand { get; }
     public ICommand InspectCommand { get; }
     public ICommand TestEchoCommand { get; }
+    public ICommand TestDestinationEchoCommand { get; }
     public ICommand OpenFileCommand { get; }
     public ICommand DumpTagsCommand { get; }
     public ICommand WhichRoutesCommand { get; }
@@ -104,13 +105,14 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         DeleteRuleCommand = new ActionCommand(() => { if (Rules.Count > 0) Rules.Remove(Rules[^1]); EnsureGraph(); PersistChanges(); });
         MoveRuleUpCommand = new ActionCommand(() => MoveRule(-1));
         MoveRuleDownCommand = new ActionCommand(() => MoveRule(1));
-        AddDestinationCommand = new ActionCommand(() => { Destinations.Add(new Destination { Name = "new-destination", AeTitle = "REMOTE", Host = "localhost" }); EnsureGraph(); PersistChanges(); });
+        AddDestinationCommand = new ActionCommand(() => { Destinations.Add(new Destination { Name = "new-destination", AeTitle = "REMOTE", Host = "localhost" }); _spooler?.UpdateDestinations(Destinations); EnsureGraph(); PersistChanges(); });
         DeleteDestinationCommand = new ActionCommand(() => { if (Destinations.Count > 0) Destinations.RemoveAt(Destinations.Count - 1); EnsureGraph(); PersistChanges(); });
-        RetryCommand = new ActionCommand(() => { foreach (var item in Spool.Where(x => x.State == "Failed")) item.State = "Pending"; OnPropertyChanged(nameof(QueueDepth)); });
-        RetryAllCommand = new ActionCommand(() => { foreach (var item in Spool.Where(x => x.State is "Failed" or "Dead Letter")) item.State = "Pending"; OnPropertyChanged(nameof(QueueDepth)); });
-        CancelCommand = new ActionCommand(() => { if (Spool.Count > 0) Spool[0].State = "Cancelled"; });
+        RetryCommand = new AsyncCommand(RetrySpoolAsync);
+        RetryAllCommand = new AsyncCommand(RetrySpoolAsync);
+        CancelCommand = new AsyncCommand(CancelSpoolAsync);
         InspectCommand = new ActionCommand(() => { SelectedTab = "Inspector"; RefreshInspector(); });
         TestEchoCommand = new AsyncCommand(TestEchoAsync);
+        TestDestinationEchoCommand = new AsyncObjectCommand(TestDestinationEchoAsync);
         OpenFileCommand = new ActionCommand(OpenLocalFile);
         DumpTagsCommand = new ActionCommand(DumpSelectedFile);
         WhichRoutesCommand = new ActionCommand(SimulateSelectedFile);
@@ -121,7 +123,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         _spooler = new Spooler(Path.Combine(AppContext.BaseDirectory, "spool"), _forwarder, Destinations.ToArray());
         _spooler.StartProcessing();
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _timer.Tick += (_, _) => { EnsureGraph(); DrainRuntimeEvents(); Throughput = IncomingImages == 0 ? 0 : Math.Round(0.02 + QueueDepth * 0.001, 2); RefreshSpool(); OnPropertyChanged(nameof(QueueDepth)); OnPropertyChanged(nameof(FailedDeliveries)); };
+        _timer.Tick += (_, _) => { EnsureGraph(); _spooler.UpdateDestinations(Destinations); DrainRuntimeEvents(); Throughput = IncomingImages == 0 ? 0 : Math.Round(0.02 + QueueDepth * 0.001, 2); RefreshSpool(); OnPropertyChanged(nameof(QueueDepth)); OnPropertyChanged(nameof(FailedDeliveries)); };
         _timer.Start();
     }
 
@@ -133,6 +135,9 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task StopScpAsync() { foreach (var listener in Listeners.ToArray()) await _listenerManager.StopAsync(listener.Configuration.Id); foreach (var listener in Listeners) listener.Status = "Stopped"; ScpRunning = false; ScpState = "STOPPED"; AddEvent("Association", "SCP stopped", "Info"); }
     private async Task TestEchoAsync() { var watch = System.Diagnostics.Stopwatch.StartNew(); ToolResult = $"C-ECHO to {TestAeTitle}@{TestHost}:{TestPort}..."; var ok = await _forwarder.EchoAsync(TestHost, TestPort, TestAeTitle, TestCallingAe); watch.Stop(); ToolResult = ok ? $"Success · {watch.ElapsedMilliseconds} ms · 1 presentation context" : "Failed · no association"; AddEvent("DIMSE", $"C-ECHO {TestAeTitle}: {ToolResult}", ok ? "Info" : "Error"); }
+    private async Task TestDestinationEchoAsync(object? parameter) { if (parameter is not Destination destination) return; var ok = await _forwarder.EchoAsync(destination.Host, destination.Port, destination.AeTitle, destination.CallingAeTitle); ToolResult = ok ? $"C-ECHO {destination.Name}: Success" : $"C-ECHO {destination.Name}: Failed"; }
+    private Task RetrySpoolAsync() => _spooler == null ? Task.CompletedTask : _spooler.RetryAsync();
+    private Task CancelSpoolAsync() => _spooler == null ? Task.CompletedTask : _spooler.CancelAsync();
     private void DrainRuntimeEvents() { var count = 0; while (count++ < 250 && _runtimeEvents.TryRead(out var runtimeEvent)) AddEvent(runtimeEvent.Type.ToString(), runtimeEvent.Message, runtimeEvent.Type == RuntimeEventType.Error || runtimeEvent.Type == RuntimeEventType.ForwardFailed ? "Error" : "Info"); }
 
     private async Task OnReceivedAsync(DicomReceivedEventArgs args)
@@ -156,7 +161,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private void OpenLocalFile() { var dialog = new OpenFileDialog { Filter = "DICOM files (*.dcm;*.*)|*.dcm;*.*", Multiselect = false }; if (dialog.ShowDialog() == true) { TestFilePath = dialog.FileName; DumpSelectedFile(); } }
     private void DumpSelectedFile() { try { var file = DicomFileParser.Parse(File.ReadAllBytes(TestFilePath)); _inspectedDataset = file.Dataset; RefreshInspector(); ToolResult = $"Parsed {_inspectedDataset.Elements.Count} elements ({file.TransferSyntax}) from {Path.GetFileName(TestFilePath)}"; } catch (Exception ex) { ToolResult = $"DICOM parse failed: {ex.Message}"; } }
     private void SimulateSelectedFile() { try { if (_inspectedDataset == null) DumpSelectedFile(); if (_inspectedDataset == null) return; var metadata = DicomMetadataForSimulation(_inspectedDataset); var matches = _evaluator.Evaluate(metadata, _configuration.Rules); var details = _configuration.Rules.SelectMany(rule => rule.Conditions.Select(condition => $"{rule.Name}: {condition.Field} {condition.Operator} {condition.Value} => {_evaluator.EvaluateCondition(metadata, condition)}")); ToolResult = string.Join(Environment.NewLine, details.Concat(new[] { matches.Count == 0 ? "No rules matched. Nothing would be sent." : $"Matched without sending: {string.Join(", ", matches)}" })); } catch (Exception ex) { ToolResult = $"Route simulation failed: {ex.Message}"; } }
-    private static IDictionary<string, string> DicomMetadataForSimulation(NativeDicomDataset dataset) => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Modality"] = dataset.Get(DicomTag.Modality), ["SeriesDescription"] = dataset.Get(DicomTag.SeriesDescription), ["PatientID"] = dataset.Get(DicomTag.PatientId), ["BodyPartExamined"] = dataset.Get(DicomTag.BodyPartExamined), ["SOPClassUID"] = dataset.Get(DicomTag.SOPClassUid), ["StudyDate"] = dataset.Get(DicomTag.StudyDate) };
+    private static IDictionary<string, string> DicomMetadataForSimulation(NativeDicomDataset dataset) => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Modality"] = dataset.Get(DicomTag.Modality), ["SeriesDescription"] = dataset.Get(DicomTag.SeriesDescription), ["PatientID"] = dataset.Get(DicomTag.PatientId), ["BodyPartExamined"] = dataset.Get(DicomTag.BodyPartExamined), ["SOPClassUID"] = dataset.Get(DicomTag.SOPClassUid), ["StudyDate"] = dataset.Get(DicomTag.StudyDate) }.Concat(dataset.Elements.ToDictionary(x => $"({x.Tag.Group:X4},{x.Tag.Element:X4})", x => x.Text, StringComparer.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
     private void RefreshSpool()
     {
         var folder = Path.Combine(AppContext.BaseDirectory, "spool"); if (!Directory.Exists(folder)) return;
@@ -265,12 +270,14 @@ public sealed class ConditionEditorRow : INotifyPropertyChanged
     private ConditionOperator _operator = ConditionOperator.Equals;
     private string _value = "";
     public ConditionEditorRow() { }
-    public ConditionEditorRow(Condition condition) { TagName = condition.Field switch { "Modality" => "Modality (0008,0060)", "SeriesDescription" => "Series Description (0008,103E)", "BodyPartExamined" => "Body Part Examined (0018,0015)", _ => condition.Field }; Operator = condition.Operator; Value = condition.Value; }
+    public ConditionEditorRow(Condition condition) { TagName = condition.Tag switch { 0x00080060 => "Modality (0008,0060)", 0x00081010 => "Station Name (0008,1010)", 0x00080070 => "Manufacturer (0008,0070)", 0x00081090 => "Manufacturer Model Name (0008,1090)", 0x00080080 => "Institution Name (0008,0080)", 0x00081030 => "Study Description (0008,1030)", 0x0008103E => "Series Description (0008,103E)", 0x00180015 => "Body Part Examined (0018,0015)", 0x00181030 => "Protocol Name (0018,1030)", 0x00081050 => "Performing Physician (0008,1050)", 0x00100040 => "Patient Sex (0010,0040)", 0x00080016 => "SOP Class UID (0008,0016)", 0x0020000D => "Study Instance UID (0020,000D)", 0x0020000E => "Series Instance UID (0020,000E)", _ => condition.Field }; Operator = condition.Operator; Value = condition.Value; }
     public string TagName { get => _tagName; set { _tagName = value; PropertyChanged?.Invoke(this, new(nameof(TagName))); } }
     public ConditionOperator Operator { get => _operator; set { _operator = value; PropertyChanged?.Invoke(this, new(nameof(Operator))); } }
     public string Value { get => _value; set { _value = value; PropertyChanged?.Invoke(this, new(nameof(Value))); } }
     public IReadOnlyList<string> ValueOptions => TagName.StartsWith("Modality", StringComparison.OrdinalIgnoreCase) ? new[] { "CT", "MR", "CR", "DX", "US", "XA", "RF", "NM", "PT", "MG", "SC", "OT" } : Array.Empty<string>();
-    public Condition ToCondition() => new() { Field = TagName.Split(" (")[0], Operator = Operator, Value = Value };
+    public Condition ToCondition() => new() { Tag = TagNumber, FriendlyName = TagName.Split(" (")[0], Field = TagName.Split(" (")[0], Operator = Operator, Value = Value };
+    public uint TagNumber => TagName switch { "Modality (0008,0060)" => 0x00080060, "Station Name (0008,1010)" => 0x00081010, "Manufacturer (0008,0070)" => 0x00080070, "Manufacturer Model Name (0008,1090)" => 0x00081090, "Institution Name (0008,0080)" => 0x00080080, "Study Description (0008,1030)" => 0x00081030, "Series Description (0008,103E)" => 0x0008103E, "Body Part Examined (0018,0015)" => 0x00180015, "Protocol Name (0018,1030)" => 0x00181030, "Performing Physician (0008,1050)" => 0x00081050, "Patient Sex (0010,0040)" => 0x00100040, "SOP Class UID (0008,0016)" => 0x00080016, "Study Instance UID (0020,000D)" => 0x0020000D, "Series Instance UID (0020,000E)" => 0x0020000E, _ => ParseCustomTag() };
+    private uint ParseCustomTag() { var parts = TagName.Split('(', ')', ','); return parts.Length >= 3 && uint.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out var group) && uint.TryParse(parts[2], System.Globalization.NumberStyles.HexNumber, null, out var element) ? (group << 16) | element : 0; }
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 public sealed class ConditionGroupEditorRow
@@ -278,6 +285,7 @@ public sealed class ConditionGroupEditorRow
     public ConditionGroupEditorRow() { }
     public ConditionGroupEditorRow(ConditionGroup group) { Operator = group.Operator; Negate = group.Negate; foreach (var condition in group.Conditions) Conditions.Add(new ConditionEditorRow(condition)); foreach (var child in group.Groups) Groups.Add(new ConditionGroupEditorRow(child)); }
     public ConditionGroupOperator Operator { get; set; } = ConditionGroupOperator.And;
+    public ConditionGroupEditorRow? Parent { get; set; }
     public bool Negate { get; set; }
     public ObservableCollection<ConditionEditorRow> Conditions { get; } = new();
     public ObservableCollection<ConditionGroupEditorRow> Groups { get; } = new();
@@ -290,3 +298,4 @@ public sealed record LogRow(string Time, string Category, string Message, string
 public sealed record InspectorTag(string Tag, string Name, string Value, bool UsedInRouting);
 public sealed class ActionCommand(Action action) : ICommand { event EventHandler? ICommand.CanExecuteChanged { add { } remove { } } public bool CanExecute(object? parameter) => true; public void Execute(object? parameter) => action(); }
 public sealed class AsyncCommand(Func<Task> action, Func<bool>? canExecute = null) : ICommand { event EventHandler? ICommand.CanExecuteChanged { add { } remove { } } public bool CanExecute(object? parameter) => canExecute?.Invoke() ?? true; public async void Execute(object? parameter) => await action(); }
+public sealed class AsyncObjectCommand(Func<object?, Task> action) : ICommand { event EventHandler? ICommand.CanExecuteChanged { add { } remove { } } public bool CanExecute(object? parameter) => true; public async void Execute(object? parameter) => await action(parameter); }

@@ -39,12 +39,16 @@ namespace DicomRouter.Infrastructure.Dicom
                 {
                     var response = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
                     if (response.Type != PduType.Data) return false;
+                    using var responseBytes = new MemoryStream();
                     foreach (var pdv in DicomProtocol.ParseDataPdu(response.Body))
                     {
-                        var responseCommand = NativeDicomDataset.Parse(pdv.Payload, DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        responseBytes.Write(pdv.Payload);
+                        if ((pdv.Control & 2) == 0) continue;
+                        var responseCommand = NativeDicomDataset.Parse(responseBytes.ToArray(), DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        responseBytes.SetLength(0);
                         if (responseCommand.GetUInt16(DicomTag.MessageIdBeingRespondedTo) == id)
                         {
-                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, Array.Empty<byte>(), timeout.Token).ConfigureAwait(false);
+                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, new byte[4], timeout.Token).ConfigureAwait(false);
                             var success = responseCommand.GetUInt16(DicomTag.Status) == 0;
                             Events?.Publish(new RuntimeEvent(success ? RuntimeEventType.ForwardSucceeded : RuntimeEventType.ForwardFailed, DateTime.UtcNow, $"C-ECHO {calledAETitle}"));
                             return success;
@@ -68,27 +72,32 @@ namespace DicomRouter.Infrastructure.Dicom
                 await using var stream = client.GetStream();
                 var sopClass = dataset.Get(DicomTag.SOPClassUid);
                 if (string.IsNullOrWhiteSpace(sopClass)) return false;
-                await DicomProtocol.WritePduAsync(stream, PduType.AssociateRequest, DicomProtocol.BuildAssociateRequest(callingAET, dest.AeTitle, new[] { sopClass }), timeout.Token).ConfigureAwait(false);
+                await DicomProtocol.WritePduAsync(stream, PduType.AssociateRequest, DicomProtocol.BuildAssociateRequest(callingAET, dest.AeTitle, new[] { sopClass }, dataset.TransferSyntax), timeout.Token).ConfigureAwait(false);
                 Events?.Publish(new RuntimeEvent(RuntimeEventType.ForwardStarted, DateTime.UtcNow, $"C-STORE {dest.Name}"));
                 var association = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
                 if (association.Type != PduType.AssociateAccept) return false;
                 var context = DicomProtocol.ParseAssociateAccept(association.Body).FirstOrDefault(x => x.Accepted);
                 if (context == null) return false;
+                var negotiatedPdu = DicomProtocol.ParseMaximumPduLength(association.Body);
                 var messageId = (ushort)Interlocked.Increment(ref _messageId);
                 var command = DicomProtocol.BuildCommand(0x0001, messageId, 0x0000, sopClass, dataset.Get(DicomTag.SOPInstanceUid));
-                await DicomProtocol.WriteDataPdusAsync(stream, context.Id, command, dataset.OriginalBytes, dest.MaxPduSize, timeout.Token).ConfigureAwait(false);
+                await DicomProtocol.WriteDataPdusAsync(stream, context.Id, command, dataset.OriginalBytes, Math.Min(dest.MaxPduSize, negotiatedPdu), timeout.Token).ConfigureAwait(false);
                 while (true)
                 {
                     var response = await DicomProtocol.ReadPduAsync(stream, timeout.Token).ConfigureAwait(false);
                     if (response.Type == PduType.Abort || response.Type == PduType.ReleaseRequest) return false;
                     if (response.Type != PduType.Data) continue;
+                    using var responseBytes = new MemoryStream();
                     foreach (var pdv in DicomProtocol.ParseDataPdu(response.Body))
                     {
-                        var responseCommand = NativeDicomDataset.Parse(pdv.Payload, DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        responseBytes.Write(pdv.Payload);
+                        if ((pdv.Control & 2) == 0) continue;
+                        var responseCommand = NativeDicomDataset.Parse(responseBytes.ToArray(), DicomTransferSyntax.ImplicitVrLittleEndian, true);
+                        responseBytes.SetLength(0);
                         if (responseCommand.GetUInt16(DicomTag.MessageIdBeingRespondedTo) == messageId)
                         {
                             var status = responseCommand.GetUInt16(DicomTag.Status);
-                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, Array.Empty<byte>(), timeout.Token).ConfigureAwait(false);
+                            await DicomProtocol.WritePduAsync(stream, PduType.ReleaseRequest, new byte[4], timeout.Token).ConfigureAwait(false);
                             var success = status == 0;
                             Events?.Publish(new RuntimeEvent(success ? RuntimeEventType.ForwardSucceeded : RuntimeEventType.ForwardFailed, DateTime.UtcNow, $"C-STORE {dest.Name}"));
                             return success;

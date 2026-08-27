@@ -35,7 +35,7 @@ namespace DicomRouter.Core.Services
 
         public bool EvaluateCondition(IDictionary<string, string> metadata, Condition cond)
         {
-            metadata.TryGetValue(cond.Field, out var raw);
+            var raw = ResolveValue(metadata, cond);
             raw ??= string.Empty;
             var cmp = cond.Value ?? string.Empty;
 
@@ -86,6 +86,14 @@ namespace DicomRouter.Core.Services
                 default:
                     return false;
             }
+        }
+
+        private static string? ResolveValue(IDictionary<string, string> metadata, Condition condition)
+        {
+            if (!string.IsNullOrWhiteSpace(condition.Field) && metadata.TryGetValue(condition.Field, out var named)) return named;
+            if (condition.Tag == 0) return null;
+            var key = $"({condition.Tag >> 16:X4},{condition.Tag & 0xFFFF:X4})";
+            return metadata.TryGetValue(key, out var tagged) ? tagged : null;
         }
 
         private bool EvaluateGroup(IDictionary<string, string> metadata, ConditionGroup group)
