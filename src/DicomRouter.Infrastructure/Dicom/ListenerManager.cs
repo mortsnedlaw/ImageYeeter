@@ -17,7 +17,7 @@ public sealed class ListenerManager : IAsyncDisposable
         Validate(configuration);
         if (_running.ContainsKey(configuration.Id)) return;
         var listener = new NativeDicomListener(configuration.MaxPduSize, configuration.MaxAssociations, configuration.AssociationTimeoutSeconds, configuration.ReceiveTimeoutSeconds, _events);
-        listener.OnDicomReceived += _received;
+        listener.OnDicomReceived += args => { args.ListenerId = configuration.Id; args.ListenerName = configuration.Name; return _received(args); };
         try
         {
             await listener.StartAsync(configuration.CalledAeTitle, configuration.BindIp, configuration.Port).ConfigureAwait(false);

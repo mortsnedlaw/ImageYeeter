@@ -22,5 +22,7 @@ namespace DicomRouter.Infrastructure.Dicom
         /// Remote AE Title of the sender.
         /// </summary>
         public string RemoteAET { get; set; } = string.Empty;
+        public string ListenerId { get; set; } = string.Empty;
+        public string ListenerName { get; set; } = string.Empty;
     }
 }

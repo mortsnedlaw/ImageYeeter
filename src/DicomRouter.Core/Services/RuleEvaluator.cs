@@ -33,7 +33,7 @@ namespace DicomRouter.Core.Services
             return matches;
         }
 
-        private bool EvaluateCondition(IDictionary<string, string> metadata, Condition cond)
+        public bool EvaluateCondition(IDictionary<string, string> metadata, Condition cond)
         {
             metadata.TryGetValue(cond.Field, out var raw);
             raw ??= string.Empty;

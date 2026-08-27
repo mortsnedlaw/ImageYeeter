@@ -24,6 +24,7 @@ public sealed class GraphNode
     public double X { get; set; }
     public double Y { get; set; }
     public bool Enabled { get; set; } = true;
+    public string DisplayText { get; set; } = string.Empty;
 }
 
 public sealed class GraphEdge

@@ -17,6 +17,7 @@ public sealed class RouteGraphCanvas : Canvas
     public IEnumerable? Nodes { get => (IEnumerable?)GetValue(NodesProperty); set => SetValue(NodesProperty, value); }
     public IEnumerable? Edges { get => (IEnumerable?)GetValue(EdgesProperty); set => SetValue(EdgesProperty, value); }
     public Action<GraphEdge>? EdgeCreated { get; set; }
+    public Action<GraphEdge>? EdgeDeleted { get; set; }
 
     protected override void OnRender(DrawingContext drawingContext)
     {
@@ -33,7 +34,7 @@ public sealed class RouteGraphCanvas : Canvas
         {
             var brush = node.Enabled ? new SolidColorBrush(Color.FromRgb(29, 42, 53)) : new SolidColorBrush(Color.FromRgb(49, 40, 43));
             drawingContext.DrawRoundedRectangle(brush, new Pen(new SolidColorBrush(Color.FromRgb(73, 101, 116)), 1), new Rect(node.X, node.Y, 170, 84), 6, 6);
-            var label = new FormattedText($"{node.Type.ToUpperInvariant()}\n{node.ReferenceId}\n● {(node.Enabled ? "ENABLED" : "DISABLED")}", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 12, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var label = new FormattedText($"{node.Type.ToUpperInvariant()}\n{node.DisplayText}\n● {(node.Enabled ? "ENABLED" : "DISABLED")}", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 12, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
             drawingContext.DrawText(label, new Point(node.X + 12, node.Y + 10));
         }
     }
@@ -43,6 +44,20 @@ public sealed class RouteGraphCanvas : Canvas
         var point = e.GetPosition(this);
         _dragNode = Nodes?.Cast<GraphNode>().LastOrDefault(node => new Rect(node.X, node.Y, 170, 84).Contains(point));
         if (_dragNode != null) { if (point.X >= _dragNode.X + 145) _connectFrom = _dragNode; _dragOffset = new Point(point.X - _dragNode.X, point.Y - _dragNode.Y); CaptureMouse(); }
+    }
+    protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
+    {
+        var point = e.GetPosition(this);
+        var nodes = Nodes?.Cast<GraphNode>().ToDictionary(x => x.Id) ?? new();
+        var edge = Edges?.Cast<GraphEdge>().FirstOrDefault(candidate => nodes.TryGetValue(candidate.FromNodeId, out var from) && nodes.TryGetValue(candidate.ToNodeId, out var to) && DistanceToSegment(point, new Point(from.X + 170, from.Y + 42), new Point(to.X, to.Y + 42)) < 10);
+        if (edge != null) { EdgeDeleted?.Invoke(edge); if (DataContext is MainWindowViewModel viewModel) viewModel.RemoveEdge(edge); e.Handled = true; }
+    }
+    private static double DistanceToSegment(Point point, Point start, Point end)
+    {
+        var dx = end.X - start.X; var dy = end.Y - start.Y; var lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared == 0) return (point - start).Length;
+        var t = Math.Clamp(((point.X - start.X) * dx + (point.Y - start.Y) * dy) / lengthSquared, 0, 1);
+        return (point - new Point(start.X + t * dx, start.Y + t * dy)).Length;
     }
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -60,10 +75,11 @@ public sealed class RouteGraphCanvas : Canvas
                 var edge = new GraphEdge { FromNodeId = _connectFrom.Id, ToNodeId = target.Id };
                 if (Edges is IList edgeList && !Edges.Cast<GraphEdge>().Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId)) edgeList.Add(edge);
                 EdgeCreated?.Invoke(edge);
+                if (DataContext is MainWindowViewModel viewModel) viewModel.ConnectEdge(edge);
             }
             _connectFrom = null;
         }
-        if (_dragNode != null) { ReleaseMouseCapture(); _dragNode = null; }
+        if (_dragNode != null) { ReleaseMouseCapture(); _dragNode = null; if (DataContext is MainWindowViewModel viewModel) viewModel.PersistGraph(); }
         InvalidateVisual();
     }
 }

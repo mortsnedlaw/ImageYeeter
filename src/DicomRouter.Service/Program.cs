@@ -25,8 +25,12 @@ public static class Program
         async Task ReceiveAsync(DicomReceivedEventArgs args)
         {
             var matches = evaluator.Evaluate(args.Metadata, configuration.Rules);
-            var destinations = configuration.Rules.Where(rule => matches.Contains(rule.Name, StringComparer.OrdinalIgnoreCase))
-                .SelectMany(rule => rule.DestinationNames).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var listenerNode = configuration.GraphNodes.FirstOrDefault(node => node.Type == "Listener" && node.ReferenceId == args.ListenerId);
+            var allowedRuleIds = listenerNode == null ? new HashSet<string>() : configuration.GraphEdges.Where(edge => edge.FromNodeId == listenerNode.Id).Select(edge => configuration.GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)).Where(node => node?.Type == "Rule").Select(node => node!.ReferenceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var directDestinationIds = listenerNode == null ? Enumerable.Empty<string>() : configuration.GraphEdges.Where(edge => edge.FromNodeId == listenerNode.Id).Select(edge => configuration.GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)).Where(node => node?.Type == "Destination").Select(node => node!.ReferenceId);
+            var connectedDestinationIds = configuration.Rules.Where(rule => matches.Contains(rule.Name, StringComparer.OrdinalIgnoreCase) && allowedRuleIds.Contains(rule.Id)).SelectMany(rule => configuration.GraphEdges.Where(edge => edge.FromNodeId == configuration.GraphNodes.FirstOrDefault(node => node.Type == "Rule" && node.ReferenceId == rule.Id)?.Id).Select(edge => configuration.GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)?.ReferenceId)).Where(id => id != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var destinations = configuration.Rules.Where(rule => matches.Contains(rule.Name, StringComparer.OrdinalIgnoreCase) && allowedRuleIds.Contains(rule.Id))
+                .SelectMany(rule => rule.DestinationNames.Where(name => configuration.Destinations.Any(destination => destination.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && connectedDestinationIds.Contains(destination.Id)))).Concat(configuration.Destinations.Where(destination => directDestinationIds.Contains(destination.Id)).Select(destination => destination.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (destinations.Count > 0)
                 await spooler.EnqueueAsync(args.Dataset, destinations, callingAET: args.RemoteAET).ConfigureAwait(false);
             Console.WriteLine($"Received {args.Dataset.Get(DicomTag.SOPInstanceUid)}; matched {string.Join(", ", matches)}");

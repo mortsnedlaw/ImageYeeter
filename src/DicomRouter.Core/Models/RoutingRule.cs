@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace DicomRouter.Core.Models
@@ -7,6 +8,8 @@ namespace DicomRouter.Core.Models
     /// </summary>
     public class RoutingRule
     {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
         /// <summary>
         /// Unique name of the rule.
         /// </summary>
@@ -27,6 +30,8 @@ namespace DicomRouter.Core.Models
         /// </summary>
         public List<Condition> Conditions { get; set; } = new List<Condition>();
         public ConditionGroup? ConditionTree { get; set; }
+
+        public string ConditionSummary { get; set; } = string.Empty;
 
         /// <summary>
         /// Destination names to forward to when matched.
