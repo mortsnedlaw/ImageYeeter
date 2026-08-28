@@ -33,6 +33,8 @@ namespace DicomRouter.Core.Services
             return matches;
         }
 
+        public bool EvaluateRule(IDictionary<string, string> metadata, RoutingRule rule) => rule.ConditionTree != null ? EvaluateGroup(metadata, rule.ConditionTree) : rule.Conditions.All(cond => EvaluateCondition(metadata, cond));
+
         public bool EvaluateCondition(IDictionary<string, string> metadata, Condition cond)
         {
             var raw = ResolveValue(metadata, cond);

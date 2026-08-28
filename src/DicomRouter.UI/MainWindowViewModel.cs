@@ -143,12 +143,11 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private async Task OnReceivedAsync(DicomReceivedEventArgs args)
     {
         IncomingImages++; var size = args.RawDataset.Length; var sop = args.Dataset.Get(DicomTag.SOPInstanceUid); _inspectedDataset = args.Dataset;
-        var matches = _evaluator.Evaluate(args.Metadata, _configuration.Rules);
         var listenerNode = GraphNodes.FirstOrDefault(x => x.Type == "Listener" && x.ReferenceId == args.ListenerId);
         var allowedRuleIds = listenerNode == null ? new HashSet<string>() : GraphEdges.Where(x => x.FromNodeId == listenerNode.Id).Select(x => GraphNodes.FirstOrDefault(node => node.Id == x.ToNodeId)).Where(x => x?.Type == "Rule").Select(x => x!.ReferenceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var directDestinationIds = listenerNode == null ? Enumerable.Empty<string>() : GraphEdges.Where(x => x.FromNodeId == listenerNode.Id).Select(x => GraphNodes.FirstOrDefault(node => node.Id == x.ToNodeId)).Where(x => x?.Type == "Destination").Select(x => x!.ReferenceId);
-        var connectedDestinationIds = _configuration.Rules.Where(x => matches.Contains(x.Name) && allowedRuleIds.Contains(x.Id)).SelectMany(rule => GraphEdges.Where(edge => edge.FromNodeId == GraphNodes.FirstOrDefault(node => node.Type == "Rule" && node.ReferenceId == rule.Id)?.Id).Select(edge => GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)?.ReferenceId)).Where(id => id != null).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var destinations = _configuration.Rules.Where(x => matches.Contains(x.Name) && allowedRuleIds.Contains(x.Id)).SelectMany(x => x.DestinationNames.Where(name => Destinations.Any(destination => destination.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && connectedDestinationIds.Contains(destination.Id)))).Concat(Destinations.Where(x => directDestinationIds.Contains(x.Id)).Select(x => x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var matches = _evaluator.Evaluate(args.Metadata, _configuration.Rules.Where(x => allowedRuleIds.Contains(x.Id)));
+        var destinations = _configuration.Rules.Where(x => allowedRuleIds.Contains(x.Id)).SelectMany(rule => GraphEdges.Where(edge => edge.FromNodeId == GraphNodes.FirstOrDefault(node => node.Type == "Rule" && node.ReferenceId == rule.Id)?.Id && string.Equals(edge.Branch, _evaluator.EvaluateRule(args.Metadata, rule) ? "True" : "False", StringComparison.OrdinalIgnoreCase)).Select(edge => Destinations.FirstOrDefault(destination => destination.Id == GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)?.ReferenceId)?.Name).OfType<string>()).Concat(Destinations.Where(x => directDestinationIds.Contains(x.Id)).Select(x => x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (destinations.Count > 0) await _spooler.EnqueueAsync(args.Dataset, destinations, callingAET: args.RemoteAET);
         Traffic.Insert(0, new TrafficRow { CallingAe = args.RemoteAET, Destination = string.Join(", ", destinations), Ip = "remote", Port = 0, SopClass = args.Dataset.Get(DicomTag.SOPClassUid), StudyUid = args.Dataset.Get(DicomTag.StudyInstanceUid), SeriesUid = args.Dataset.Get(DicomTag.SeriesInstanceUid), SopUid = sop, Size = $"{size / 1024.0:0.0} KB", Duration = "accepted", Status = "Stored" });
         foreach (var destination in destinations) RouteFlow.Insert(0, new RouteRow { Source = args.RemoteAET, Destination = destination, Status = "Pending", Rule = string.Join(", ", matches) });
@@ -197,7 +196,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         var from = GraphNodes.FirstOrDefault(x => x.Id == edge.FromNodeId);
         var to = GraphNodes.FirstOrDefault(x => x.Id == edge.ToNodeId);
         if (from == null || to == null || (from.Type == "Listener" && to.Type is not ("Rule" or "Destination")) || (from.Type == "Rule" && to.Type != "Destination") || from.Type == "Destination") return;
-        if (!GraphEdges.Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId)) GraphEdges.Add(edge);
+        if (!GraphEdges.Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId && x.Branch == edge.Branch)) GraphEdges.Add(edge);
         if (from.Type == "Rule")
         {
             var rule = Rules.FirstOrDefault(x => x.Id == from.ReferenceId);

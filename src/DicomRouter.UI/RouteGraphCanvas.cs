@@ -18,6 +18,7 @@ public sealed class RouteGraphCanvas : FrameworkElement
     private GraphEdge? _selectedEdge;
     private Point _dragOffset;
     private Point _connectPoint;
+    private string _connectBranch = "True";
     public IEnumerable? Nodes { get => (IEnumerable?)GetValue(NodesProperty); set => SetValue(NodesProperty, value); }
     public IEnumerable? Edges { get => (IEnumerable?)GetValue(EdgesProperty); set => SetValue(EdgesProperty, value); }
     public Action<GraphEdge>? EdgeCreated { get; set; }
@@ -42,29 +43,31 @@ public sealed class RouteGraphCanvas : FrameworkElement
         foreach (var edge in Edges?.Cast<GraphEdge>() ?? Enumerable.Empty<GraphEdge>())
         {
             if (nodes.TryGetValue(edge.FromNodeId, out var from) && nodes.TryGetValue(edge.ToNodeId, out var to))
-                DrawEdge(dc, Output(from), Input(to), edge == _selectedEdge ? Brushes.White : new SolidColorBrush(Color.FromRgb(82, 214, 161)), edge == _selectedEdge ? 3 : 2);
+                DrawEdge(dc, Output(from, edge.Branch), Input(to), edge == _selectedEdge ? Brushes.White : edge.Branch == "False" ? new SolidColorBrush(Color.FromRgb(242, 184, 75)) : new SolidColorBrush(Color.FromRgb(82, 214, 161)), edge == _selectedEdge ? 3 : 2);
         }
         if (_connectFrom != null)
         {
             foreach (var node in nodes.Values)
                 if (node != _connectFrom && IsValidTarget(_connectFrom, node))
                     dc.DrawEllipse(new SolidColorBrush(Color.FromArgb(180, 85, 214, 160)), new Pen(Brushes.White, 1), Input(node), 10, 10);
-            DrawEdge(dc, Output(_connectFrom), _connectPoint, new SolidColorBrush(Color.FromRgb(242, 184, 75)), 2);
+            DrawEdge(dc, Output(_connectFrom, _connectBranch), _connectPoint, new SolidColorBrush(Color.FromRgb(242, 184, 75)), 2);
         }
         foreach (var node in nodes.Values)
         {
             var rect = new Rect(node.X, node.Y, NodeWidth, NodeHeight);
             dc.DrawRoundedRectangle(node.Enabled ? new SolidColorBrush(Color.FromRgb(29, 42, 53)) : new SolidColorBrush(Color.FromRgb(49, 40, 43)), new Pen(new SolidColorBrush(Color.FromRgb(73, 101, 116)), 1), rect, 8, 8);
             if (node.Type is "Rule" or "Destination") DrawPort(dc, Input(node));
-            if (node.Type is "Listener" or "Rule") DrawPort(dc, Output(node));
-            var label = new FormattedText($"{node.Type.ToUpperInvariant()}\n{node.DisplayText}\n{(node.Enabled ? "ENABLED" : "DISABLED")}", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 12, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip) { MaxTextWidth = NodeWidth - 30, Trimming = TextTrimming.CharacterEllipsis };
+            if (node.Type == "Listener") DrawPort(dc, Output(node, "True"));
+            if (node.Type == "Rule") { DrawPort(dc, Output(node, "True"), Brushes.LightGreen); DrawPort(dc, Output(node, "False"), Brushes.Goldenrod); }
+            var branchLabels = node.Type == "Rule" ? "\nTRUE ●     FALSE ●" : string.Empty;
+            var label = new FormattedText($"{node.Type.ToUpperInvariant()}\n{node.DisplayText}{branchLabels}\n{(node.Enabled ? "ENABLED" : "DISABLED")}", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 12, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip) { MaxTextWidth = NodeWidth - 30, Trimming = TextTrimming.CharacterEllipsis };
             dc.DrawText(label, new Point(node.X + 15, node.Y + 12));
         }
     }
 
-    private static void DrawPort(DrawingContext dc, Point point) => dc.DrawEllipse(new SolidColorBrush(Color.FromRgb(82, 214, 161)), new Pen(Brushes.White, 1), point, 7, 7);
+    private static void DrawPort(DrawingContext dc, Point point, Brush? brush = null) => dc.DrawEllipse(brush ?? new SolidColorBrush(Color.FromRgb(82, 214, 161)), new Pen(Brushes.White, 1), point, 7, 7);
     private static Point Input(GraphNode node) => new(node.X, node.Y + NodeHeight / 2);
-    private static Point Output(GraphNode node) => new(node.X + NodeWidth, node.Y + NodeHeight / 2);
+    private static Point Output(GraphNode node, string branch) => node.Type == "Rule" && branch == "False" ? new(node.X + NodeWidth, node.Y + NodeHeight * .75) : new(node.X + NodeWidth, node.Y + NodeHeight * .25);
     private static bool IsValidTarget(GraphNode from, GraphNode to) => (from.Type == "Listener" && to.Type is "Rule" or "Destination") || (from.Type == "Rule" && to.Type == "Destination");
     private static bool Near(Point point, Point target) => (point - target).Length <= 16;
     private static bool NearSegment(Point point, Point start, Point end)
@@ -87,9 +90,9 @@ public sealed class RouteGraphCanvas : FrameworkElement
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
         Focus(); var point = e.GetPosition(this); var nodes = Nodes?.Cast<GraphNode>().ToList() ?? new();
-        _connectFrom = nodes.LastOrDefault(node => (node.Type is "Listener" or "Rule") && Near(point, Output(node)));
-        if (_connectFrom != null) { _connectPoint = point; CaptureMouse(); InvalidateVisual(); return; }
-        _selectedEdge = Edges?.Cast<GraphEdge>().FirstOrDefault(edge => { var from = nodes.FirstOrDefault(x => x.Id == edge.FromNodeId); var to = nodes.FirstOrDefault(x => x.Id == edge.ToNodeId); return from != null && to != null && NearSegment(point, Output(from), Input(to)); });
+        _connectFrom = nodes.LastOrDefault(node => (node.Type == "Listener" && Near(point, Output(node, "True"))) || (node.Type == "Rule" && (Near(point, Output(node, "True")) || Near(point, Output(node, "False")))));
+        if (_connectFrom != null) { _connectBranch = _connectFrom.Type == "Rule" && point.Y > _connectFrom.Y + NodeHeight / 2 ? "False" : "True"; _connectPoint = point; CaptureMouse(); InvalidateVisual(); return; }
+        _selectedEdge = Edges?.Cast<GraphEdge>().FirstOrDefault(edge => { var from = nodes.FirstOrDefault(x => x.Id == edge.FromNodeId); var to = nodes.FirstOrDefault(x => x.Id == edge.ToNodeId); return from != null && to != null && NearSegment(point, Output(from, edge.Branch), Input(to)); });
         _dragNode = nodes.LastOrDefault(node => new Rect(node.X, node.Y, NodeWidth, NodeHeight).Contains(point));
         if (_dragNode != null) { _dragOffset = new Point(point.X - _dragNode.X, point.Y - _dragNode.Y); CaptureMouse(); }
         InvalidateVisual();
@@ -106,7 +109,7 @@ public sealed class RouteGraphCanvas : FrameworkElement
             var point = e.GetPosition(this); var target = Nodes?.Cast<GraphNode>().FirstOrDefault(node => node != _connectFrom && IsValidTarget(_connectFrom, node) && Near(point, Input(node)));
             if (target != null)
             {
-                var edge = new GraphEdge { FromNodeId = _connectFrom.Id, ToNodeId = target.Id };
+                var edge = new GraphEdge { FromNodeId = _connectFrom.Id, ToNodeId = target.Id, Branch = _connectBranch };
                 EdgeCreated?.Invoke(edge);
                 if (EdgeCreated == null && DataContext is MainWindowViewModel viewModel) viewModel.ConnectEdge(edge);
             }

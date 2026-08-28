@@ -31,6 +31,7 @@ public sealed class GraphEdge
 {
     public string FromNodeId { get; set; } = string.Empty;
     public string ToNodeId { get; set; } = string.Empty;
+    public string Branch { get; set; } = "True";
 }
 
 public sealed class RouterConfiguration
