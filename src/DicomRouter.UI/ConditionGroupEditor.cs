@@ -64,12 +64,15 @@ public sealed class ConditionGroupEditor : Border
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var viewModel = Application.Current?.Windows.OfType<MainWindow>().FirstOrDefault()?.DataContext as MainWindowViewModel;
         var tags = new ComboBox { ItemsSource = viewModel?.DicomTags ?? Array.Empty<string>(), SelectedItem = condition.TagName };
+        ApplyDarkComboBoxStyle(tags);
         tags.SelectionChanged += (_, _) => { condition.TagName = tags.SelectedItem?.ToString() ?? condition.TagName; Group?.Changed?.Invoke(); };
         row.Children.Add(tags);
         var operators = new ComboBox { ItemsSource = Enum.GetValues<ConditionOperator>(), SelectedItem = condition.Operator, Margin = new Thickness(4, 0, 0, 0) };
+        ApplyDarkComboBoxStyle(operators);
         operators.SelectionChanged += (_, _) => { if (operators.SelectedItem is ConditionOperator value) { condition.Operator = value; Group?.Changed?.Invoke(); } };
         Grid.SetColumn(operators, 1); row.Children.Add(operators);
         var value = new ComboBox { IsEditable = true, Text = condition.Value, ItemsSource = condition.ValueOptions, Margin = new Thickness(4, 0, 0, 0) };
+        ApplyDarkComboBoxStyle(value);
         value.AddHandler(TextBox.TextChangedEvent, new TextChangedEventHandler((_, _) => { condition.Value = value.Text; Group?.Changed?.Invoke(); }));
         Grid.SetColumn(value, 2); row.Children.Add(value);
         var remove = new Button { Content = "x", Width = 24, Padding = new Thickness(0), Margin = new Thickness(4, 0, 0, 0) };
@@ -77,5 +80,30 @@ public sealed class ConditionGroupEditor : Border
         Grid.SetColumn(remove, 3);
         row.Children.Add(remove);
         return row;
+    }
+
+    private static void ApplyDarkComboBoxStyle(ComboBox comboBox)
+    {
+        var style = new Style(typeof(ComboBox));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(17, 24, 29))));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Color.FromRgb(231, 237, 242))));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(52, 70, 80))));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(5)));
+        var focused = new Trigger { Property = UIElement.IsFocusedProperty, Value = true };
+        focused.Setters.Add(new Setter(Control.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(85, 214, 160))));
+        focused.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
+        style.Triggers.Add(focused);
+        comboBox.Style = style;
+
+        var itemStyle = new Style(typeof(ComboBoxItem));
+        itemStyle.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(17, 24, 29))));
+        itemStyle.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Color.FromRgb(231, 237, 242))));
+        comboBox.Resources[typeof(ComboBoxItem)] = itemStyle;
+
+        var textStyle = new Style(typeof(TextBox));
+        textStyle.Setters.Add(new Setter(Control.BackgroundProperty, new SolidColorBrush(Color.FromRgb(17, 24, 29))));
+        textStyle.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Color.FromRgb(231, 237, 242))));
+        textStyle.Setters.Add(new Setter(TextBox.CaretBrushProperty, Brushes.White));
+        comboBox.Resources[typeof(TextBox)] = textStyle;
     }
 }

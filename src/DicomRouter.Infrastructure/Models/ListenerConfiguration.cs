@@ -1,3 +1,5 @@
+using DicomRouter.Core.Models;
+
 namespace DicomRouter.Infrastructure.Models;
 
 public sealed class ListenerConfiguration
@@ -14,24 +16,6 @@ public sealed class ListenerConfiguration
     public int ReceiveTimeoutSeconds { get; set; } = 60;
     public int MaxPduSize { get; set; } = 16 * 1024;
     public string Notes { get; set; } = string.Empty;
-}
-
-public sealed class GraphNode
-{
-    public string Id { get; set; } = Guid.NewGuid().ToString("N");
-    public string Type { get; set; } = "Rule";
-    public string ReferenceId { get; set; } = string.Empty;
-    public double X { get; set; }
-    public double Y { get; set; }
-    public bool Enabled { get; set; } = true;
-    public string DisplayText { get; set; } = string.Empty;
-}
-
-public sealed class GraphEdge
-{
-    public string FromNodeId { get; set; } = string.Empty;
-    public string ToNodeId { get; set; } = string.Empty;
-    public string Branch { get; set; } = "True";
 }
 
 public sealed class RouterConfiguration

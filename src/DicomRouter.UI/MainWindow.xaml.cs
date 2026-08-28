@@ -44,6 +44,12 @@ namespace DicomRouter.UI
             factory.SetBinding(FrameworkElement.DataContextProperty, new System.Windows.Data.Binding("RootGroup"));
             var template = new DataTemplate { VisualTree = factory };
             grid.Columns.Insert(3, new DataGridTemplateColumn { Header = "CONDITIONS", CellTemplate = template, Width = new DataGridLength(4, DataGridLengthUnitType.Star) });
+            if (grid.Columns.Count > 5)
+            {
+                grid.Columns[4].Header = "TRUE ROUTES";
+                if (grid.Columns[4] is DataGridTextColumn trueRoutes) trueRoutes.Binding = new System.Windows.Data.Binding("TrueRoutes");
+                grid.Columns.Insert(5, new DataGridTextColumn { Header = "FALSE ROUTES", Binding = new System.Windows.Data.Binding("FalseRoutes") });
+            }
         }
 
         private static T? FindVisualChild<T>(DependencyObject root, Func<T, bool> predicate) where T : DependencyObject

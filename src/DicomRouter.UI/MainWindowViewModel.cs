@@ -21,7 +21,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private readonly ListenerManager _listenerManager;
     private RouterConfiguration _configuration = new();
     private readonly DicomForwarder _forwarder;
-    private readonly RuleEvaluator _evaluator = new();
+    private readonly RoutingPlanner _routingPlanner = new();
     private readonly Spooler _spooler;
     private readonly RuntimeEventBus _runtimeEvents = new();
     private readonly DispatcherTimer _timer;
@@ -101,7 +101,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         _listenerManager = new ListenerManager(OnReceivedAsync, _runtimeEvents);
         StartScpCommand = new AsyncCommand(StartScpAsync, () => !ScpRunning);
         StopScpCommand = new AsyncCommand(StopScpAsync, () => ScpRunning);
-        AddRuleCommand = new ActionCommand(() => { var rule = new RuleEditorRow { Name = "New rule", Priority = Rules.Count + 1 }; rule.RootGroup.Conditions.Add(new ConditionEditorRow()); Rules.Add(rule); EnsureGraph(); PersistChanges(); });
+        AddRuleCommand = new ActionCommand(() => { var rule = new RuleEditorRow { Name = "New rule", Priority = Rules.Count + 1 }; rule.RootGroup.Conditions.Add(new ConditionEditorRow()); SubscribeRule(rule); Rules.Add(rule); EnsureGraph(); PersistChanges(); });
         DeleteRuleCommand = new ActionCommand(() => { if (Rules.Count > 0) Rules.Remove(Rules[^1]); EnsureGraph(); PersistChanges(); });
         MoveRuleUpCommand = new ActionCommand(() => MoveRule(-1));
         MoveRuleDownCommand = new ActionCommand(() => MoveRule(1));
@@ -143,14 +143,11 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private async Task OnReceivedAsync(DicomReceivedEventArgs args)
     {
         IncomingImages++; var size = args.RawDataset.Length; var sop = args.Dataset.Get(DicomTag.SOPInstanceUid); _inspectedDataset = args.Dataset;
-        var listenerNode = GraphNodes.FirstOrDefault(x => x.Type == "Listener" && x.ReferenceId == args.ListenerId);
-        var allowedRuleIds = listenerNode == null ? new HashSet<string>() : GraphEdges.Where(x => x.FromNodeId == listenerNode.Id).Select(x => GraphNodes.FirstOrDefault(node => node.Id == x.ToNodeId)).Where(x => x?.Type == "Rule").Select(x => x!.ReferenceId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var directDestinationIds = listenerNode == null ? Enumerable.Empty<string>() : GraphEdges.Where(x => x.FromNodeId == listenerNode.Id).Select(x => GraphNodes.FirstOrDefault(node => node.Id == x.ToNodeId)).Where(x => x?.Type == "Destination").Select(x => x!.ReferenceId);
-        var matches = _evaluator.Evaluate(args.Metadata, _configuration.Rules.Where(x => allowedRuleIds.Contains(x.Id)));
-        var destinations = _configuration.Rules.Where(x => allowedRuleIds.Contains(x.Id)).SelectMany(rule => GraphEdges.Where(edge => edge.FromNodeId == GraphNodes.FirstOrDefault(node => node.Type == "Rule" && node.ReferenceId == rule.Id)?.Id && string.Equals(edge.Branch, _evaluator.EvaluateRule(args.Metadata, rule) ? "True" : "False", StringComparison.OrdinalIgnoreCase)).Select(edge => Destinations.FirstOrDefault(destination => destination.Id == GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId)?.ReferenceId)?.Name).OfType<string>()).Concat(Destinations.Where(x => directDestinationIds.Contains(x.Id)).Select(x => x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var plan = _routingPlanner.Plan(args.ListenerId, args.Metadata, _configuration.Rules, GraphNodes, GraphEdges);
+        var destinations = Destinations.Where(x => plan.DestinationIds.Contains(x.Id, StringComparer.OrdinalIgnoreCase)).Select(x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (destinations.Count > 0) await _spooler.EnqueueAsync(args.Dataset, destinations, callingAET: args.RemoteAET);
         Traffic.Insert(0, new TrafficRow { CallingAe = args.RemoteAET, Destination = string.Join(", ", destinations), Ip = "remote", Port = 0, SopClass = args.Dataset.Get(DicomTag.SOPClassUid), StudyUid = args.Dataset.Get(DicomTag.StudyInstanceUid), SeriesUid = args.Dataset.Get(DicomTag.SeriesInstanceUid), SopUid = sop, Size = $"{size / 1024.0:0.0} KB", Duration = "accepted", Status = "Stored" });
-        foreach (var destination in destinations) RouteFlow.Insert(0, new RouteRow { Source = args.RemoteAET, Destination = destination, Status = "Pending", Rule = string.Join(", ", matches) });
+        foreach (var destination in destinations) RouteFlow.Insert(0, new RouteRow { Source = args.RemoteAET, Destination = destination, Status = "Pending", Rule = string.Join(", ", plan.Evaluations.Where(x => x.Result).Select(x => x.RuleId)) });
         RefreshInspector();
         AddEvent("Spool", $"Stored {sop} ({size} bytes)", "Info");
         OnPropertyChanged(nameof(QueueDepth));
@@ -159,7 +156,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
     private void RefreshInspector() { InspectorTags.Clear(); if (_inspectedDataset == null) return; foreach (var element in _inspectedDataset.Elements.Where(x => string.IsNullOrWhiteSpace(InspectorFilter) || $"{x.Tag} {x.VR} {x.Text}".Contains(InspectorFilter, StringComparison.OrdinalIgnoreCase))) InspectorTags.Add(new InspectorTag($"({element.Tag})", element.Tag.ToString(), element.Value.Length > 1024 ? $"<binary {element.Value.Length} bytes>" : element.Text, false)); }
     private void OpenLocalFile() { var dialog = new OpenFileDialog { Filter = "DICOM files (*.dcm;*.*)|*.dcm;*.*", Multiselect = false }; if (dialog.ShowDialog() == true) { TestFilePath = dialog.FileName; DumpSelectedFile(); } }
     private void DumpSelectedFile() { try { var file = DicomFileParser.Parse(File.ReadAllBytes(TestFilePath)); _inspectedDataset = file.Dataset; RefreshInspector(); ToolResult = $"Parsed {_inspectedDataset.Elements.Count} elements ({file.TransferSyntax}) from {Path.GetFileName(TestFilePath)}"; } catch (Exception ex) { ToolResult = $"DICOM parse failed: {ex.Message}"; } }
-    private void SimulateSelectedFile() { try { if (_inspectedDataset == null) DumpSelectedFile(); if (_inspectedDataset == null) return; var metadata = DicomMetadataForSimulation(_inspectedDataset); var matches = _evaluator.Evaluate(metadata, _configuration.Rules); var details = _configuration.Rules.SelectMany(rule => rule.Conditions.Select(condition => $"{rule.Name}: {condition.Field} {condition.Operator} {condition.Value} => {_evaluator.EvaluateCondition(metadata, condition)}")); ToolResult = string.Join(Environment.NewLine, details.Concat(new[] { matches.Count == 0 ? "No rules matched. Nothing would be sent." : $"Matched without sending: {string.Join(", ", matches)}" })); } catch (Exception ex) { ToolResult = $"Route simulation failed: {ex.Message}"; } }
+    private void SimulateSelectedFile() { try { if (_inspectedDataset == null) DumpSelectedFile(); if (_inspectedDataset == null) return; var metadata = DicomMetadataForSimulation(_inspectedDataset); var listenerId = Listeners.FirstOrDefault()?.Configuration.Id ?? string.Empty; var plan = _routingPlanner.Plan(listenerId, metadata, _configuration.Rules, GraphNodes, GraphEdges); ToolResult = string.Join(Environment.NewLine, plan.Evaluations.Select(x => $"{x.RuleId}: {x.Result} [{x.Branch}] -> {string.Join(", ", x.DestinationIds)} | {string.Join(", ", x.MatchedConditions)}").Concat(new[] { plan.DestinationIds.Count == 0 ? "No destinations." : $"Destinations: {string.Join(", ", Destinations.Where(x => plan.DestinationIds.Contains(x.Id, StringComparer.OrdinalIgnoreCase)).Select(x => x.Name))}" })); } catch (Exception ex) { ToolResult = $"Route simulation failed: {ex.Message}"; } }
     private static IDictionary<string, string> DicomMetadataForSimulation(NativeDicomDataset dataset) => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Modality"] = dataset.Get(DicomTag.Modality), ["SeriesDescription"] = dataset.Get(DicomTag.SeriesDescription), ["PatientID"] = dataset.Get(DicomTag.PatientId), ["BodyPartExamined"] = dataset.Get(DicomTag.BodyPartExamined), ["SOPClassUID"] = dataset.Get(DicomTag.SOPClassUid), ["StudyDate"] = dataset.Get(DicomTag.StudyDate) }.Concat(dataset.Elements.ToDictionary(x => $"({x.Tag.Group:X4},{x.Tag.Element:X4})", x => x.Text, StringComparer.OrdinalIgnoreCase)).ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
     private void RefreshSpool()
     {
@@ -173,7 +170,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         if (_configuration.Listeners.Count == 0) _configuration.Listeners.Add(new ListenerConfiguration { Name = "ImageYeeter Main" });
         foreach (var listener in _configuration.Listeners) Listeners.Add(new ListenerRow { Configuration = listener });
         foreach (var destination in _configuration.Destinations) Destinations.Add(destination);
-        foreach (var rule in _configuration.Rules) { var row = new RuleEditorRow(rule); row.PropertyChanged += (_, _) => { EnsureGraph(); PersistChanges(); }; Rules.Add(row); }
+        foreach (var rule in _configuration.Rules) { var row = new RuleEditorRow(rule); SubscribeRule(row); Rules.Add(row); }
         foreach (var node in _configuration.GraphNodes) GraphNodes.Add(node); foreach (var edge in _configuration.GraphEdges) GraphEdges.Add(edge);
         if (Destinations.Count == 0) Destinations.Add(new Destination { Name = "PACS", AeTitle = "PACS01", Host = "localhost" });
         EnsureGraph();
@@ -185,7 +182,14 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         foreach (var listener in Listeners) UpsertNode("Listener", listener.Configuration.Id, Friendly(listener), 40, listener.Configuration.Enabled);
         foreach (var rule in Rules) UpsertNode("Rule", rule.Id, $"{rule.Name}  P{rule.Priority}\n{rule.Summary}", 330, rule.Enabled);
         foreach (var destination in Destinations) UpsertNode("Destination", destination.Id, Friendly(destination), 650, destination.Enabled);
+        foreach (var rule in Rules)
+        {
+            rule.TrueRoutes = RouteNames(rule.Id, "True");
+            rule.FalseRoutes = RouteNames(rule.Id, "False");
+        }
     }
+    private void SubscribeRule(RuleEditorRow rule) => rule.PropertyChanged += (_, args) => { if (args.PropertyName is not (nameof(RuleEditorRow.TrueRoutes) or nameof(RuleEditorRow.FalseRoutes))) { EnsureGraph(); PersistChanges(); } };
+    private string RouteNames(string ruleId, string branch) => string.Join(", ", GraphEdges.Where(edge => edge.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase)).Select(edge => GraphNodes.FirstOrDefault(node => node.Id == edge.FromNodeId && node.Type == "Rule" && node.ReferenceId == ruleId) == null ? null : GraphNodes.FirstOrDefault(node => node.Id == edge.ToNodeId && node.Type == "Destination")?.ReferenceId).Where(id => id != null).Select(id => Destinations.FirstOrDefault(destination => destination.Id == id)?.Name).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase));
     private void UpsertNode(string type, string referenceId, string display, double x, bool enabled) { var node = GraphNodes.FirstOrDefault(x => x.Type == type && x.ReferenceId == referenceId); if (node == null) GraphNodes.Add(node = new GraphNode { Type = type, ReferenceId = referenceId, X = x, Y = 40 + GraphNodes.Count(x => x.Type == type) * 110 }); node.DisplayText = display; node.Enabled = enabled; }
     private static string Friendly(ListenerRow row) => $"{row.Name}\n{row.AeTitle}  {row.Endpoint}\n{row.Status}";
     private static string Friendly(Destination destination) => $"{destination.Name}\n{destination.AeTitle}  {destination.Host}:{destination.Port}\n{(destination.Enabled ? "Enabled" : "Disabled")}";
@@ -197,12 +201,6 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         var to = GraphNodes.FirstOrDefault(x => x.Id == edge.ToNodeId);
         if (from == null || to == null || (from.Type == "Listener" && to.Type is not ("Rule" or "Destination")) || (from.Type == "Rule" && to.Type != "Destination") || from.Type == "Destination") return;
         if (!GraphEdges.Any(x => x.FromNodeId == edge.FromNodeId && x.ToNodeId == edge.ToNodeId && x.Branch == edge.Branch)) GraphEdges.Add(edge);
-        if (from.Type == "Rule")
-        {
-            var rule = Rules.FirstOrDefault(x => x.Id == from.ReferenceId);
-            var destination = Destinations.FirstOrDefault(x => x.Id == to.ReferenceId);
-            if (rule != null && destination != null && !rule.Destination.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Contains(destination.Name, StringComparer.OrdinalIgnoreCase)) rule.Destination = string.Join(", ", rule.Destination.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Append(destination.Name));
-        }
         PersistChanges();
     }
     public void RemoveEdge(GraphEdge edge)
@@ -210,12 +208,6 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         GraphEdges.Remove(edge);
         var from = GraphNodes.FirstOrDefault(x => x.Id == edge.FromNodeId);
         var to = GraphNodes.FirstOrDefault(x => x.Id == edge.ToNodeId);
-        if (from?.Type == "Rule" && to?.Type == "Destination")
-        {
-            var rule = Rules.FirstOrDefault(x => x.Id == from.ReferenceId);
-            var destination = Destinations.FirstOrDefault(x => x.Id == to.ReferenceId);
-            if (rule != null && destination != null) rule.Destination = string.Join(", ", rule.Destination.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Where(x => !string.Equals(x, destination.Name, StringComparison.OrdinalIgnoreCase)));
-        }
         PersistChanges();
     }
     public void PersistGraph() => PersistChanges();
@@ -228,7 +220,7 @@ public sealed class MainWindowViewModel : INotifyPropertyChanged, IDisposable
         _configuration.GraphNodes = GraphNodes.ToList(); _configuration.GraphEdges = GraphEdges.ToList();
         await _configurationStore.SaveAsync(_configuration); AddEvent("Configuration", "Configuration saved atomically", "Info");
     }
-    private static RoutingRule ToCoreRule(RuleEditorRow row) => new() { Id = row.Id, Name = row.Name, Priority = row.Priority, Enabled = row.Enabled, StopOnMatch = true, ConditionTree = row.RootGroup.ToConditionGroup(), Conditions = new(), DestinationNames = row.Destination.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList(), ConditionSummary = row.Summary };
+    private static RoutingRule ToCoreRule(RuleEditorRow row) => new() { Id = row.Id, Name = row.Name, Priority = row.Priority, Enabled = row.Enabled, StopOnMatch = true, ConditionTree = row.RootGroup.ToConditionGroup(), Conditions = new(), ConditionSummary = row.Summary };
     private static Condition? ParseCondition(string expression)
     {
         var parts = expression.Split(' ', 3, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries); if (parts.Length < 2) return null;
@@ -257,6 +249,10 @@ public sealed class RuleEditorRow : INotifyPropertyChanged
     public int Priority { get => _priority; set { _priority = value; Changed(nameof(Priority)); } }
     public bool Enabled { get => _enabled; set { _enabled = value; Changed(nameof(Enabled)); } }
     public string Destination { get => _destination; set { _destination = value; Changed(nameof(Destination)); } }
+    private string _trueRoutes = "";
+    private string _falseRoutes = "";
+    public string TrueRoutes { get => _trueRoutes; internal set { _trueRoutes = value; Changed(nameof(TrueRoutes)); } }
+    public string FalseRoutes { get => _falseRoutes; internal set { _falseRoutes = value; Changed(nameof(FalseRoutes)); } }
     public ConditionGroupEditorRow RootGroup { get; private set; } = new();
     public ObservableCollection<ConditionEditorRow> Conditions { get; } = new();
     public string Summary => RootGroup.Summary;
