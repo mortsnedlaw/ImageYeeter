@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^dotnet build src/DicomRouter\\.Infrastructure/DicomRouter\\.Infrastructure\\.csproj --no-restore$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

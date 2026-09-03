@@ -39,9 +39,14 @@ namespace DicomRouter.Infrastructure.Dicom
         {
             foreach (var meta in Directory.EnumerateFiles(_spoolFolder, "*.json"))
             {
-                var item = JsonSerializer.Deserialize<SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
+                var item = JsonSerializer.Deserialize<Models.SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
                 if (item == null) continue;
-                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase))) { delivery.Cancelled = false; delivery.Succeeded = false; delivery.NextRetryUtc = DateTime.UtcNow; }
+                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    delivery.Cancelled = false;
+                    delivery.Succeeded = false;
+                    delivery.NextRetryUtc = DateTime.UtcNow;
+                }
                 item.NextAttemptUtc = DateTime.UtcNow;
                 await File.WriteAllTextAsync(meta, JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }), cancellationToken).ConfigureAwait(false);
             }
@@ -51,9 +56,10 @@ namespace DicomRouter.Infrastructure.Dicom
         {
             foreach (var meta in Directory.EnumerateFiles(_spoolFolder, "*.json"))
             {
-                var item = JsonSerializer.Deserialize<SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
+                var item = JsonSerializer.Deserialize<Models.SpoolItem>(await File.ReadAllTextAsync(meta, cancellationToken).ConfigureAwait(false));
                 if (item == null) continue;
-                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase))) delivery.Cancelled = true;
+                foreach (var delivery in item.Destinations.Where(x => destinationName == null || x.Name.Equals(destinationName, StringComparison.OrdinalIgnoreCase)))
+                    delivery.Cancelled = true;
                 await File.WriteAllTextAsync(meta, JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true }), cancellationToken).ConfigureAwait(false);
             }
         }
@@ -72,18 +78,23 @@ namespace DicomRouter.Infrastructure.Dicom
             }
             File.Move(tempPath, dcmPath);
 
-            var item = new SpoolItem
+            var item = new Models.SpoolItem
             {
                 Id = id,
+                CorrelationId = Guid.NewGuid().ToString("N"),
                 DicomFileName = Path.GetFileName(dcmPath),
+                FileSizeBytes = dataset.OriginalBytes.Length,
                 DestinationNames = destinationNames?.ToList() ?? new List<string>(),
-                Destinations = (destinationNames ?? Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase).Select(name => new DestinationDelivery { Name = name }).ToList(),
+                Destinations = (destinationNames ?? Array.Empty<string>())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Select(name => new Models.DestinationDelivery { Name = name })
+                    .ToList(),
                 TagOverrides = tagOverrides != null ? new Dictionary<string, string>(tagOverrides, StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                 Attempts = 0,
                 NextAttemptUtc = DateTime.UtcNow,
                 CreatedUtc = DateTime.UtcNow,
-                CallingAET = callingAET ?? string.Empty
-                ,TransferSyntax = dataset.TransferSyntax
+                CallingAET = callingAET ?? string.Empty,
+                TransferSyntax = TransferSyntaxEnumToUid(dataset.TransferSyntax)
             };
 
             var json = JsonSerializer.Serialize(item, new JsonSerializerOptions { WriteIndented = true });
@@ -127,11 +138,11 @@ namespace DicomRouter.Infrastructure.Dicom
                     foreach (var meta in metaFiles)
                     {
                         if (ct.IsCancellationRequested) break;
-                        SpoolItem? item = null;
+                        Models.SpoolItem? item = null;
                         try
                         {
                             var txt = await File.ReadAllTextAsync(meta, ct).ConfigureAwait(false);
-                            item = JsonSerializer.Deserialize<SpoolItem>(txt);
+                            item = JsonSerializer.Deserialize<Models.SpoolItem>(txt);
                         }
                         catch
                         {
@@ -142,7 +153,7 @@ namespace DicomRouter.Infrastructure.Dicom
 
                         if (item == null) continue;
                         if (item.Destinations.Count == 0 && item.DestinationNames.Count > 0)
-                            item.Destinations = item.DestinationNames.Select(name => new DestinationDelivery { Name = name }).ToList();
+                            item.Destinations = item.DestinationNames.Select(name => new Models.DestinationDelivery { Name = name }).ToList();
 
                         if (item.NextAttemptUtc > DateTime.UtcNow) continue;
 
@@ -154,8 +165,9 @@ namespace DicomRouter.Infrastructure.Dicom
                             continue;
                         }
 
-                        var raw = await File.ReadAllBytesAsync(dcmPath, ct).ConfigureAwait(false);
-                        var ds = NativeDicomDataset.Parse(raw, item.TransferSyntax);
+                var raw = await File.ReadAllBytesAsync(dcmPath, ct).ConfigureAwait(false);
+                var transferSyntax = TransferSyntaxUidToEnum(item.TransferSyntax);
+                var ds = NativeDicomDataset.Parse(raw, transferSyntax);
                         var pending = item.Destinations.Where(x => !x.Succeeded && !x.Cancelled).Select(async status =>
                         {
                             var dest = _destinations.FirstOrDefault(d => string.Equals(d.Name, status.Name, StringComparison.OrdinalIgnoreCase));
@@ -219,6 +231,26 @@ namespace DicomRouter.Infrastructure.Dicom
         {
             try { _cts?.Cancel(); } catch { }
             try { _worker?.Wait(1000); } catch { }
+        }
+
+        private static DicomTransferSyntax TransferSyntaxUidToEnum(string uid)
+        {
+            return uid switch
+            {
+                "1.2.840.10008.1.2.1" => DicomTransferSyntax.ExplicitVrLittleEndian,
+                "1.2.840.10008.1.2.2" => DicomTransferSyntax.ExplicitVrLittleEndian, // Treat big endian as explicit
+                _ => DicomTransferSyntax.ImplicitVrLittleEndian  // Default
+            };
+        }
+
+        private static string TransferSyntaxEnumToUid(DicomTransferSyntax syntax)
+        {
+            return syntax switch
+            {
+                DicomTransferSyntax.ExplicitVrLittleEndian => "1.2.840.10008.1.2.1",
+                DicomTransferSyntax.Encapsulated => "1.2.840.10008.1.2.5", // RLE
+                _ => "1.2.840.10008.1.2"  // Implicit VR Little Endian (default)
+            };
         }
     }
 }

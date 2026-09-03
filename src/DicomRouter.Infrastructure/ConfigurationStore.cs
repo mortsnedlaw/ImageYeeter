@@ -3,7 +3,7 @@ using DicomRouter.Infrastructure.Models;
 
 namespace DicomRouter.Infrastructure;
 
-public sealed class ConfigurationStore
+public sealed class ConfigurationStore : IConfigurationStore
 {
     private readonly string _path;
     private readonly JsonSerializerOptions _options = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };

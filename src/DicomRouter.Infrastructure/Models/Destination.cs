@@ -17,6 +17,23 @@ namespace DicomRouter.Infrastructure.Models
         public int MaxAttempts { get; set; } = 5;
         public int MaxParallelSends { get; set; } = 1;
         public bool Enabled { get; set; } = true;
-        public int MaxPduSize { get; set; } = 16 * 1024;
+
+        /// <summary>
+        /// Maximum PDU size for this destination (in bytes).
+        /// </summary>
+        public int MaxPduSize { get; set; } = 16 * 1024 * 1024;
+
+        /// <summary>
+        /// Presentation context configuration for this destination.
+        /// Defines which SOP classes and transfer syntaxes to propose during association.
+        /// If null, a default profile is used.
+        /// </summary>
+        public PresentationContextProfile? PresentationContextProfile { get; set; }
+
+        /// <summary>
+        /// Gets the effective presentation context profile for this destination.
+        /// </summary>
+        public PresentationContextProfile GetEffectiveProfile() =>
+            PresentationContextProfile ?? PresentationContextProfile.CreateDefaultStorageProfile();
     }
 }

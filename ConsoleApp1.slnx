@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DicomRouter.Core.Tests/DicomRouter.Core.Tests.csproj" />
+  </Folder>
   <Project Path="src/DicomRouter.Core/DicomRouter.Core.csproj" />
   <Project Path="src/DicomRouter.Infrastructure/DicomRouter.Infrastructure.csproj" />
   <Project Path="src/DicomRouter.Service/DicomRouter.Service.csproj" />
